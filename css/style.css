@@ -364,7 +364,15 @@ img, svg, pre, code { max-width: 100%; }
 }
 
 @media (max-width: 768px) {
-  body { grid-template-columns: 1fr; }
+  html, body {
+    overflow-x: hidden;
+    width: 100%;
+  }
+
+  body {
+    grid-template-columns: 1fr;
+    display: block;
+  }
 
   .mobile-nav-toggle { display: flex; }
 
@@ -384,16 +392,26 @@ img, svg, pre, code { max-width: 100%; }
 
   .sidebar-overlay.visible { display: block; }
 
-  .main { padding: 60px 16px 60px 16px; max-width: 100%; }
+  .main {
+    padding: 60px 16px 60px 16px;
+    max-width: 100vw;
+    width: 100%;
+    margin: 0;
+    overflow-x: hidden;
+    word-break: break-word;
+    overflow-wrap: break-word;
+  }
+
   .main h1 { font-size: 24px; }
   .main h2 { font-size: 19px; }
   .concept-cards { grid-template-columns: 1fr; }
+
   .main table {
     display: block;
+    max-width: 100%;
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
     white-space: nowrap;
     border: 1px solid var(--color-border);
   }
-  .main th, .main td { white-space: nowrap; min-width: 80px; }
 }
