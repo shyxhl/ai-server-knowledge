@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>网络互联 — 智算中心服务器全栈知识</title>
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+
+<nav class="sidebar">
+  <h2>智算中心服务器<br>全栈知识</h2>
+  <div class="stage-title">阶段 1</div>
+  <a href="01-overview.html">全景图：什么是智算中心</a>
+  <div class="stage-title">阶段 2 · 算力</div>
+  <a href="02-1-gpu-chips.html">GPU 芯片</a>
+  <a href="02-2-memory.html">内存系统</a>
+  <a href="02-3-gpu-servers.html">GPU 服务器整机</a>
+  <div class="stage-title">阶段 3 · 网络</div>
+  <a href="03-network.html">网络互联</a>
+  <div class="stage-title">阶段 4 · 存储</div>
+  <a href="04-storage.html">存储系统</a>
+  <div class="stage-title">阶段 5 · 基础设施</div>
+  <a href="05-cooling-power.html">散热与供电</a>
+  <div class="stage-title">阶段 6 · 软件栈</div>
+  <a href="06-1-drivers.html">驱动与加速层</a>
+  <a href="06-2-containers.html">容器与资源调度</a>
+  <a href="06-3-training.html">分布式训练框架</a>
+  <a href="06-4-inference.html">推理引擎</a>
+  <a href="06-5-monitoring.html">集群管理与监控</a>
+  <div class="stage-title">总结</div>
+  <a href="07-summary.html">完整参考架构</a>
+</nav>
+
+<main class="main">
+
+<h1>阶段 3 · 网络互联</h1>
+
+<p>前面我们讲了单台服务器里的 GPU 和内存。但大模型训练不是一台服务器能搞定的——需要成百上千台服务器里的几千张 GPU 同时工作。这些 GPU 之间怎么"对话"？数据怎么在它们之间高速流转？这就是网络层要解决的问题。</p>
+
+<h2>场景：几千张 GPU 怎么协同工作？</h2>
+
+<p>假设你要训练一个千亿参数的大模型。你买了 1000 台 GPU 服务器，每台 8 张 GPU——总共 8000 张 GPU。</p>
+
+<p>训练过程是这样的：每一轮"学习"（专业术语叫<strong>一次迭代</strong>），所有 8000 张 GPU 各自处理一小批数据，算出各自的"答案"（梯度）。然后，每张 GPU 需要把自己的计算结果分享给其他所有 GPU，并收集其他 GPU 的结果，综合起来更新模型参数。</p>
+
+<p>这种"所有人把自己的数据发给所有人，同时接收所有人的数据"的通信模式，叫做 <strong>All-Reduce</strong>（全归约）。它不是一次性的——每一轮迭代都会发生，而训练一个大模型可能需要<strong>几百万次迭代</strong>。</p>
+
+<div class="callout warn">
+  <strong>关键数字：</strong>在大规模训练集群中，GPU 有 30%–50% 的时间在等网络数据传输，而不是在计算。换句话说，你花大价钱买来的 GPU，有三分之一到一半的时间在"发呆"。网络带宽直接决定了这些 GPU 实际能发挥多少性能。
+</div>
+
+<p>这不是小问题。如果 8000 张 GPU 的利用率从 90% 掉到 60%，等效于你白买了 2400 张 GPU。所以网络不是配角——它是训练效率的第一要素之一。</p>
+
+<h2>核心概念</h2>
+
+<h3>RDMA：绕开 CPU 的"直达通道"</h3>
+
+<p>要理解 AI 集群网络，首先要理解 <strong>RDMA</strong>（Remote Direct Memory Access，远程直接内存访问）。</p>
+
+<p>普通网络传输的路径是这样的：</p>
+<ol>
+  <li>GPU 算完数据，存到自己的显存里</li>
+  <li>CPU 把数据从显存拷到系统内存</li>
+  <li>CPU 调用操作系统的网络协议栈（TCP/IP），把数据打包</li>
+  <li>数据经过网卡（NIC）发到网线上</li>
+  <li>对面网卡收到数据，CPU 再拆包、拷到内存、再拷到 GPU 显存</li>
+</ol>
+
+<p>每一步都有延迟，而且 CPU 全程参与，占用了本该用来干别的事情的计算资源。</p>
+
+<p><strong>RDMA 的做法完全不同：</strong></p>
+<ol>
+  <li>GPU 算完数据，网卡直接去 GPU 显存里读</li>
+  <li>网卡直接把数据发到对面网卡</li>
+  <li>对面网卡直接把数据写到目标 GPU 的显存里</li>
+</ol>
+
+<p>CPU 全程不参与。数据路径极短，延迟极低。</p>
+
+<div class="callout">
+  <strong>生活类比：</strong><br>
+  普通网络像寄信——写内容、装信封、贴邮票、投邮筒、邮局分拣、运输、派送、拆信。每一步都有人经手。<br>
+  RDMA 像直接把东西递到对方手上——没有中间环节，快得多。
+</div>
+
+<h3>InfiniBand 与 RoCE：两条技术路线</h3>
+
+<p>RDMA 是一种"能力"，不是一种具体的硬件。实现 RDMA 有两条主流技术路线：</p>
+
+<div class="concept-cards">
+  <div class="concept-card">
+    <h4>InfiniBand（IB，无限带宽）</h4>
+    <p>专为高性能计算（HPC）设计的网络技术。从硬件到软件完全自成一派，不走以太网协议。需要专用的 InfiniBand 交换机、网卡和线缆。延迟可以做到约 <strong>1 微秒</strong>（百万分之一秒）。这是 AI 训练集群的"黄金标准"。NVIDIA 旗下的 Mellanox 是这个市场的绝对霸主。</p>
+  </div>
+  <div class="concept-card">
+    <h4>RoCE v2（融合以太网上的 RDMA）</h4>
+    <p>不需要专用硬件——在标准以太网上跑 RDMA。成本低，兼容现有数据中心网络基础设施。延迟约 <strong>5-10 微秒</strong>，比 InfiniBand 高一些，但对很多场景已经够用。随着以太网速度提升到 400G、800G，RoCE 正在快速追赶 IB。</p>
+  </div>
+</div>
+
+<table>
+  <tr><th>对比维度</th><th>InfiniBand</th><th>RoCE v2</th></tr>
+  <tr><td>延迟</td><td>约 1μs</td><td>约 5-10μs</td></tr>
+  <tr><td>硬件</td><td>专用交换机 + 网卡 + 线缆</td><td>标准以太网交换机 + 支持 RoCE 的网卡</td></tr>
+  <tr><td>成本</td><td>高</td><td>中等（相对 IB 低）</td></tr>
+  <tr><td>生态</td><td>NVIDIA/Mellanox 主导</td><td>Broadcom、华为、Cisco 等多家厂商</td></tr>
+  <tr><td>适用场景</td><td>超大规模训练（万卡集群）</td><td>中小规模训练、推理、通用数据中心</td></tr>
+  <tr><td>网管复杂度</td><td>独立网络，需专门技能</td><td>融入现有以太网管理</td></tr>
+</table>
+
+<div class="callout">
+  <strong>实际情况：</strong>今天绝大多数万卡级的大模型训练集群用的是 InfiniBand。但很多云厂商（如 AWS、阿里云）在推 RoCE 方案，因为以太网交换机便宜、运维人员好找、能和云上的其他业务共用网络基础设施。
+</div>
+
+<h3>三个关键指标</h3>
+
+<div class="concept-cards">
+  <div class="concept-card">
+    <h4>带宽（Bandwidth）</h4>
+    <p>每秒能传多少数据。目前主流是每个端口 400 Gbps（吉比特每秒），正在向 800 Gbps 过渡。8 张 GPU 共享一个 400G 出口和独享 400G 是两种完全不同的体验。</p>
+  </div>
+  <div class="concept-card">
+    <h4>延迟（Latency）</h4>
+    <p>一个消息从发出到收到的耗时。InfiniBand 可到 1 微秒左右。延迟越低，GPU 空闲等数据的时间越短。</p>
+  </div>
+  <div class="concept-card">
+    <h4>尾延迟（Tail Latency）</h4>
+    <p>最慢那 1% 的消息的延迟。All-Reduce 要等所有 GPU 的数据都到位才能继续，所以训练速度被"最慢的那个"拖累。尾延迟比平均延迟更关键。</p>
+  </div>
+</div>
+
+<h2>技术要点</h2>
+
+<h3>网络拓扑：GPU 怎么连在一起？</h3>
+
+<p>8000 张 GPU 不是随便用网线连起来就行。怎么连（网络拓扑）直接决定性能和扩展性。</p>
+
+<h3>Leaf-Spine（叶脊架构）</h3>
+
+<p>目前最主流的 AI 集群拓扑。结构很简单：</p>
+<ul>
+  <li><strong>Leaf 交换机（叶子层）：</strong>直接连接 GPU 服务器。每台服务器有两个网卡，连到两台不同的 Leaf 交换机（冗余）。</li>
+  <li><strong>Spine 交换机（脊层）：</strong>每台 Spine 和每台 Leaf 都有一条链路。这样任意两台服务器之间最多经过 3 跳（Server → Leaf → Spine → Leaf → Server），延迟可预测。</li>
+</ul>
+
+<p>好处：扩展方便。要加服务器，就加 Leaf 交换机；带宽不够用了，就加 Spine 交换机。延迟固定，不会随着规模增长而恶化。</p>
+
+<h3>DragonFly（蜻蜓拓扑）</h3>
+
+<p>更复杂的拓扑结构，用于超大规模集群。核心思路是用更少的线缆覆盖更多节点——把交换机分成"组"，组内全互联，组间部分互联。比 Leaf-Spine 省线缆，但路由更复杂，管理难度更高。</p>
+
+<p>目前绝大多数 AI 训练集群用 Leaf-Spine 就够，DragonFly 主要用在超算中心。</p>
+
+<h3>光模块：机房里的"数据高速路"</h3>
+
+<p>服务器和交换机之间用铜缆（DAC，直连铜缆）就够了——几米距离，便宜可靠。但交换机之间、机柜之间，距离可能几十到几百米，铜缆信号衰减严重，必须用光纤。而<strong>光模块</strong>就是负责"电信号和光信号互相转换"的器件。</p>
+
+<p>简单说：光模块插在交换机的端口上，一头接收电信号，把它变成光信号通过光纤发出去；另一头把收到的光信号变回电信号。</p>
+
+<h3>400G 向 800G 的过渡</h3>
+
+<p>光模块的速度跟着交换机端口走：</p>
+<ul>
+  <li>2018-2022：100G → 200G → 400G</li>
+  <li>2023-2024：400G 大规模部署</li>
+  <li>2024-2025：800G 开始量产，1.6T（1600G）在研发中</li>
+</ul>
+
+<p>速度翻倍意味着什么？同样训练一个模型，如果 All-Reduce 通信时间占训练总时间的 40%，把网络带宽翻倍就能把这 40% 减半，等效于训练速度提升约 20%——几千张 GPU，提 20% 是什么概念。</p>
+
+<h3>单模光纤 vs 多模光纤</h3>
+
+<table>
+  <tr><th>对比维度</th><th>多模光纤 (MMF)</th><th>单模光纤 (SMF)</th></tr>
+  <tr><td>纤芯直径</td><td>50 微米（粗）</td><td>9 微米（细）</td></tr>
+  <tr><td>传输距离</td><td>约 100 米以内</td><td>可达数公里</td></tr>
+  <tr><td>成本</td><td>光模块便宜，光纤略贵</td><td>光模块略贵，光纤便宜</td></tr>
+  <tr><td>使用场景</td><td>同机房内机柜间连接</td><td>跨机房、跨楼栋连接</td></tr>
+</table>
+
+<p>AI 集群内部连接大多用多模光纤——距离短、光模块便宜、够用。跨机房才需要单模。</p>
+
+<h3>NVIDIA 的端到端方案：最深的护城河</h3>
+
+<p>看懂 NVIDIA 为什么这么强，不仅要看 GPU，更要看它的"全链路控制"：</p>
+
+<div class="callout">
+  <strong>NVIDIA 数据路径：</strong><br>
+  GPU ← <strong>NVLink</strong>（片间互联） → <strong>NVSwitch</strong>（机内 GPU 全互联） ← <strong>ConnectX 网卡</strong>（RDMA 智能网卡） → <strong>Quantum 交换机</strong>（InfiniBand）/ <strong>Spectrum 交换机</strong>（以太网） → 其他 GPU
+</div>
+
+<p>从芯片到网线，NVIDIA 控制了数据经过的<strong>每一个节点</strong>：</p>
+<ul>
+  <li><strong>NVLink + NVSwitch：</strong>服务器内部 8 张 GPU 之间的互联。最新一代 NVSwitch 让机内 GPU 之间带宽达到 1.8 TB/s。</li>
+  <li><strong>ConnectX 智能网卡：</strong>RDMA 网卡，直接读写 GPU 显存。支持 InfiniBand 和 RoCE 双协议。最新 ConnectX-8 支持 800 Gbps。</li>
+  <li><strong>Quantum 交换机：</strong>InfiniBand 交换机，NVIDIA 的看家产品。Quantum-3 支持 400 Gbps 单端口，Quantum-X800 支持 800 Gbps。</li>
+  <li><strong>Spectrum 交换机：</strong>以太网交换机产品线，跑 RoCE。面向不想用 InfiniBand 的客户。</li>
+</ul>
+
+<div class="callout warn">
+  <strong>关键事件：2019 年 NVIDIA 以 69 亿美元收购 Mellanox。</strong>当时很多人觉得贵，今天回头看，这是 NVIDIA 历史上最重要的战略决策之一。它让 NVIDIA 从"只卖 GPU"变成了"卖整个 AI 基础设施"。客户买 GPU 就必须买配套网络，竞争对手在任何一个环节都很难替代。
+</div>
+
+<p>这种垂直整合是 NVIDIA 最深的结构性优势——即使有人做出比 H100 更强的 GPU，也很难复制从 NVLink 到 Quantum 交换机的全栈深度。</p>
+
+<h2>品牌对比</h2>
+
+<h3>交换机芯片与交换机</h3>
+
+<table>
+  <tr><th>厂商</th><th>产品线</th><th>协议</th><th>定位</th></tr>
+  <tr>
+    <td><strong>NVIDIA / Mellanox</strong></td>
+    <td>Quantum (InfiniBand)<br>Spectrum (Ethernet)</td>
+    <td>IB + RoCE</td>
+    <td>AI 网络绝对王者。Quantum 系列是万卡训练集群的标配</td>
+  </tr>
+  <tr>
+    <td><strong>Broadcom</strong></td>
+    <td>Tomahawk 5<br>Jericho3</td>
+    <td>Ethernet / RoCE</td>
+    <td>以太网交换机芯片全球最大供应商。很多品牌交换机（思科、Arista、华为）内部用的都是 Broadcom 芯片</td>
+  </tr>
+  <tr>
+    <td><strong>华为</strong></td>
+    <td>CloudEngine 数据中心交换机</td>
+    <td>RoCE</td>
+    <td>国产替代主力。自主芯片（海思），已在多个国产智算中心部署</td>
+  </tr>
+  <tr>
+    <td><strong>Cisco</strong></td>
+    <td>Nexus 系列</td>
+    <td>Ethernet / RoCE</td>
+    <td>老牌网络巨头。AI 集群网络不是其核心优势市场，但在企业级数据中心仍有大量部署</td>
+  </tr>
+</table>
+
+<h3>光模块</h3>
+
+<table>
+  <tr><th>厂商</th><th>国家</th><th>定位</th></tr>
+  <tr>
+    <td><strong>中际旭创 (InnoLight)</strong></td>
+    <td>中国</td>
+    <td>全球光模块出货量前列。NVIDIA 光模块核心供应商，800G 产品已批量出货</td>
+  </tr>
+  <tr>
+    <td><strong>Coherent（原 Finisar）</strong></td>
+    <td>美国</td>
+    <td>高端光模块老牌厂商。在 800G 和 1.6T 上布局较早</td>
+  </tr>
+  <tr>
+    <td><strong>华为（海思）</strong></td>
+    <td>中国</td>
+    <td>自研光模块和光芯片，配套自家交换机，不对外单独销售光模块</td>
+  </tr>
+  <tr>
+    <td><strong>Eoptolink（新易盛）</strong></td>
+    <td>中国</td>
+    <td>国内光模块第二梯队，800G 在送样验证中</td>
+  </tr>
+</table>
+
+<div class="callout warn">
+  <strong>成本陷阱：</strong>很多人以为买 GPU 服务器是大头，网络只是"配件"。实际情况是，在大规模 AI 集群中，<strong>网络设备（交换机 + 光模块 + 线缆）可以占到集群总成本的 15%-25%。</strong>一个高端 InfiniBand 交换机几十万到上百万人民币，800G 光模块一颗几千块，一个集群需要几百上千颗。网络不是事后考虑的东西——它是立项阶段就必须做的一级设计决策。
+</div>
+
+<h2>怎么选：给非技术决策者的建议</h2>
+
+<p>如果你是销售或采购，面对客户问"网络怎么配"，几个核心判断依据：</p>
+
+<ul>
+  <li><strong>规模决定协议：</strong>1000 张 GPU 以上的训练集群，InfiniBand 几乎是必选。几百张卡规模，RoCE 完全可以。推理场景（GPU 之间不需要频繁通信）用 RoCE 甚至普通以太网都行。</li>
+  <li><strong>NVIDIA 捆绑策略：</strong>买 NVIDIA GPU，网络大概率也是 NVIDIA 的。这也是 NVIDIA 收购 Mellanox 的目的——让客户在一个供应商这里买齐。</li>
+  <li><strong>国产替代路径：</strong>华为昇腾 + CloudEngine 交换机 + 自研光模块，是目前唯一能做到"全国产"的方案。性能有差距，但自主可控是硬需求。</li>
+  <li><strong>光模块是耗材：</strong>光模块有寿命，故障率比交换机高得多。大集群通常需要储备 3%-5% 的备件。</li>
+</ul>
+
+<div class="summary-box">
+  <h3>阶段 3 总结</h3>
+  <p>AI 训练集群中，网络不是配角——它直接决定了几千张 GPU 能发挥多少性能。</p>
+  <ul>
+    <li><strong>RDMA</strong> 让数据绕开 CPU 直达 GPU 显存，是高速网络的基础</li>
+    <li><strong>InfiniBand</strong> 是当前万卡训练集群的标配，延迟约 1 微秒</li>
+    <li><strong>RoCE v2</strong> 在以太网上跑 RDMA，成本更低，正在快速追赶</li>
+    <li>网络设备占集群总成本 <strong>15%-25%</strong>，不是"配件"而是一级决策</li>
+    <li><strong>NVIDIA 通过收购 Mellanox 控制了从 GPU 到交换机的全链路</strong>，这是它最强的竞争壁垒之一</li>
+  </ul>
+</div>
+
+<h2>延伸阅读</h2>
+
+<ul>
+  <li><a href="https://network.nvidia.com/zh-cn/" target="_blank">NVIDIA Networking 官方站点</a> — Quantum InfiniBand 和 Spectrum Ethernet 产品详情、白皮书</li>
+  <li><strong>"Scaling Distributed Training with NVIDIA Quantum-2 InfiniBand"</strong> — NVIDIA 官方白皮书，解释 InfiniBand 在分布式训练中的具体作用</li>
+  <li><strong>ACL 论文 "A Decade of Data-center Network Architecture"</strong> — 对数据中心网络架构演进（包括 Leaf-Spine、DragonFly）的学术综述</li>
+</ul>
+
+<p style="margin-top: 32px; font-size: 14px; color: var(--color-muted);">
+  <a href="04-storage.html">下一阶段：存储系统 →</a>
+</p>
+
+</main>
+
+<script src="../js/nav.js"></script>
+</body>
+</html>

@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>存储系统 — 智算中心服务器全栈知识</title>
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+
+<nav class="sidebar">
+  <h2>智算中心服务器<br>全栈知识</h2>
+  <div class="stage-title">阶段 1</div>
+  <a href="01-overview.html">全景图：什么是智算中心</a>
+  <div class="stage-title">阶段 2 · 算力</div>
+  <a href="02-1-gpu-chips.html">GPU 芯片</a>
+  <a href="02-2-memory.html">内存系统</a>
+  <a href="02-3-gpu-servers.html">GPU 服务器整机</a>
+  <div class="stage-title">阶段 3 · 网络</div>
+  <a href="03-network.html">网络互联</a>
+  <div class="stage-title">阶段 4 · 存储</div>
+  <a href="04-storage.html" class="active">存储系统</a>
+  <div class="stage-title">阶段 5 · 基础设施</div>
+  <a href="05-cooling-power.html">散热与供电</a>
+  <div class="stage-title">阶段 6 · 软件栈</div>
+  <a href="06-1-drivers.html">驱动与加速层</a>
+  <a href="06-2-containers.html">容器与资源调度</a>
+  <a href="06-3-training.html">分布式训练框架</a>
+  <a href="06-4-inference.html">推理引擎</a>
+  <a href="06-5-monitoring.html">集群管理与监控</a>
+  <div class="stage-title">总结</div>
+  <a href="07-summary.html">完整参考架构</a>
+</nav>
+
+<main class="main">
+
+<h1>阶段 4 · 存储系统</h1>
+
+<p>前面讲了 GPU 怎么算、网络怎么传。但数据和算力之间还有最后一段路：数据存在哪里？怎么在需要的时候以最快的速度送到 GPU 手上？这就是存储系统的任务。</p>
+
+<h2>场景：训练一个大模型需要多少数据？</h2>
+
+<p>训练 GPT-4 级别的模型，需要大约 15 万亿个 token（文本单元，可以理解为一个词或标点符号），这差不多相当于整个互联网上经过筛选的高质量文本总量。这些数据在磁盘上大约占 10-50 PB（拍字节，1PB = 1000TB，也就是 1,000,000 GB）。</p>
+
+<p>更关键的是速度要求。训练过程中，每一轮迭代（模型学一遍数据的"回合"），几千张 GPU 都需要同时读取下一批数据。每张 GPU 的处理速度极快——如果数据读取得不够快，GPU 就会陷入"等数据"的状态。</p>
+
+<div class="callout warn">
+  <strong>核心问题：</strong>一块 H100 GPU 每秒能处理多少数据，集群的存储系统就必须至少以同样的速度把数据喂给它。1000 张 H100 同时训练，存储系统需要提供 100-300 GB/s 的持续读取速度。这不是"硬盘够不够大"的问题，而是"水管够不够粗"的问题。
+</div>
+
+<p>所以 AI 训练的存储，核心不是"仓库"（存多少），而是"传送带"（传多快）。这个认知转变是理解整个存储系统设计的前提。</p>
+
+<h2>核心概念</h2>
+
+<h3>IOPS 与吞吐量：送货次数 vs 包裹大小</h3>
+
+<p>存储性能有两个容易混淆的指标：</p>
+
+<div class="concept-cards">
+  <div class="concept-card">
+    <h4>IOPS（每秒读写次数）</h4>
+    <p>IOPS（Input/Output Operations Per Second）衡量存储系统每秒能完成多少次读写操作。每次操作可能只读写几 KB 的数据。IOPS 高意味着系统擅长处理大量小文件、随机读写——比如数据库查询、网页服务器。</p>
+  </div>
+  <div class="concept-card">
+    <h4>吞吐量（Throughput）</h4>
+    <p>吞吐量衡量每秒能传输多少 GB 的数据。AI 训练读的是大文件（数据集文件动辄几百 GB 到 TB 级别），而且是顺序读取——从头到尾一口气读完。这种场景下，吞吐量远比 IOPS 重要。</p>
+  </div>
+</div>
+
+<p><strong>生活类比：</strong>IOPS 像快递员每小时能送多少个包裹——要跑很多不同的地址，考验的是"小件多送"的能力。吞吐量像货运列车单次能拉多少吨货——只跑一条线路，考验的是"单次运量大"的能力。AI 训练需要货运列车，不是快递员。</p>
+
+<div class="callout">
+  <strong>为什么这个区分很重要：</strong>很多传统企业存储（比如普通 NAS，网络附加存储）是为"小文件、随机读写"场景优化的——IOPS 很高，但吞吐量有限。拿这种存储来做 AI 训练，就像让快递员运沙石——也能运，但效率极低，GPU 大部分时间在空等。
+</div>
+
+<h3>并行文件系统：不止一个"服务窗口"</h3>
+
+<p>即使单个硬盘再快，也有物理上限。要让成百上千张 GPU 同时读取数据，存储系统本身必须能"并行"——多个存储服务器同时服务，带宽叠加。</p>
+
+<p>传统做法的瓶颈在哪里？来看两种架构的对比：</p>
+
+<div class="concept-cards">
+  <div class="concept-card">
+    <h4>NFS（普通网络文件系统）</h4>
+    <p>一台文件服务器管所有数据，所有客户端（GPU 服务器）都通过这台服务器读写。所有请求汇到一个点，带宽受限于单台服务器的网卡和硬盘速度。典型上限：10-20 GB/s。在 AI 训练场景下，这就是瓶颈——1000 张 GPU 抢一个门，大部分在排队。</p>
+  </div>
+  <div class="concept-card">
+    <h4>并行文件系统（Parallel FS）</h4>
+    <p>数据被"切条"（stripe，分条）分散存放在几十甚至几百台存储服务器上。每个客户端可以同时和所有存储服务器通信，读一个文件时从所有服务器并行读取。每加一台存储服务器，总带宽就线性增加。100 台服务器 × 每台 2 GB/s = 200 GB/s 总带宽。</p>
+  </div>
+</div>
+
+<p><strong>生活类比：</strong>NFS 像银行只有一位柜员，所有客户排一条队。并行文件系统像 100 台 ATM 同时工作，每个客户去不同的机器，整体服务能力翻 100 倍。</p>
+
+<p>并行文件系统还有一个关键特性：<strong>POSIX 兼容</strong>（Portable Operating System Interface，可移植操作系统接口——简单说就是像操作普通本地文件一样操作远程存储）。训练程序不用改代码，标准文件读写操作自动享受并行带宽。这对 AI 开发者是透明的。</p>
+
+<h3>存储分层：不是所有数据都值得用最好的硬盘</h3>
+
+<p>训练一个模型涉及不同类型的数据，它们的访问频率和速度要求完全不同。全用最贵的 NVMe SSD（一种基于 PCIe 接口的超高速闪存盘，速度可达 7 GB/s）成本太高，全用便宜的机械硬盘又太慢。合理的做法是分层（Storage Tiering，存储分层）：</p>
+
+<div class="concept-cards">
+  <div class="concept-card">
+    <h4>热数据（Hot Data）</h4>
+    <p>正在被训练程序使用的当前数据集。每轮迭代都要读，延迟绝对不能拖后腿。<strong>存储介质：NVMe SSD</strong>。速度可达 100 万 IOPS、7 GB/s 单盘吞吐量。</p>
+  </div>
+  <div class="concept-card">
+    <h4>温数据（Warm Data）</h4>
+    <p>最近几轮训练的数据集、训练中间保存的检查点（checkpoint，训练到一半保存的模型快照，防止崩溃后重来）。访问频率中等，不要求极致性能。<strong>存储介质：SATA SSD 或高性能机械硬盘</strong>。</p>
+  </div>
+  <div class="concept-card">
+    <h4>冷数据（Cold Data）</h4>
+    <p>已训练完成的旧模型、几个月前的原始数据集、实验记录、归档日志。很少被读取，但必须保留。<strong>存储介质：大容量机械硬盘、对象存储（如 S3 兼容的对象存储服务）、或磁带库</strong>。</p>
+  </div>
+</div>
+
+<p>分层策略直接影响成本。一个 1000 卡集群的热存储可能只有 2-5 PB（全 NVMe），但冷数据可能累积到 50 PB 以上（大部分在廉价机械硬盘上）。如果不做分层，全用 NVMe 的成本可能比分层方案高 5-10 倍。</p>
+
+<div class="callout">
+  <strong>数据流动：</strong>好的存储系统能自动在不同层之间迁移数据。当前训练集从冷层"预热"到热层，训练结束后自动降回冷层。这种生命周期管理（数据从创建到删除的全过程管理）是存储系统软件的核心能力之一。
+</div>
+
+<h2>技术要点</h2>
+
+<h3>主流并行文件系统</h3>
+
+<p>并行文件系统在科研计算领域有几十年的历史。AI 训练的兴起给它带来了新需求——更大的带宽、对 GPU 的直接数据通路。以下是几个核心玩家：</p>
+
+<div class="concept-cards">
+  <div class="concept-card">
+    <h4>Lustre</h4>
+    <p>开源并行文件系统，全球高性能计算（HPC）领域使用最广泛。绝大多数 Top500 超算中心都用它。架构成熟稳定，扩展性好——可以支持数万客户端、数千存储服务器。但部署和运维复杂，需要专门的 Lustre 工程师。由 Whamcloud（现属 DDN）维护核心开发。</p>
+  </div>
+  <div class="concept-card">
+    <h4>GPFS / Spectrum Scale</h4>
+    <p>IBM 的商业并行文件系统。企业级功能丰富——权限管理、加密、快照、异地复制一应俱全。在金融、制造业等传统行业有大量部署。性能不输 Lustre，但要付费，且绑定 IBM 生态。对于纯 AI 场景，有点"功能过多导致复杂且贵"。</p>
+  </div>
+  <div class="concept-card">
+    <h4>WekaFS</h4>
+    <p>较新的玩家，专门为 AI 和 GPU 负载设计。相比 Lustre，部署简单得多——不需要专门的文件系统工程师。原生支持 NVMe 和 GPU Direct Storage。性能极强，但对网络要求高（通常需要 InfiniBand 或 100G 以上以太网）。正在快速抢 AI 场景的市场。</p>
+  </div>
+</div>
+
+<div class="callout warn">
+  <strong>Lustre 的"痛苦门槛"：</strong>Lustre 在超算圈用了 20 年，稳定性和性能没话说。但它的安装和调优确实复杂——需要配置元数据服务器（MDS，存文件目录结构）、对象存储服务器（OSS，存实际数据块）、管理服务器（MGS，存集群配置），还有各种 stripe 大小、网络参数调优。规模越大越需要专业团队。很多 AI 团队就是因为"不想再养一个 Lustre 团队"而选择了 WekaFS 或商业一体机方案。
+</div>
+
+<h3>GPU Direct Storage：让数据直达 GPU</h3>
+
+<p>传统的数据读取路径很长：</p>
+<ol>
+  <li>存储设备（SSD）读到服务器内存（通过 CPU）</li>
+  <li>CPU 再把数据从内存拷到 GPU 显存</li>
+  <li>GPU 开始计算</li>
+</ol>
+
+<p>每一步都是开销——CPU 参与、多次拷贝、PCIe 总线往返占用。</p>
+
+<p><strong>GPU Direct Storage（GDS，GPU 直连存储）</strong> 是 NVIDIA 的一项技术，它让存储设备直接把数据写到 GPU 显存，完全绕开 CPU 和系统内存：</p>
+<ol>
+  <li>NVMe SSD → RDMA 网卡 → GPU 显存</li>
+</ol>
+
+<p>一步到位。不是"更快地经过 CPU"，而是"不经过 CPU"。延迟显著降低，CPU 负载大幅减少——省下来的 CPU 资源可以用于数据预处理（解压、解码、增强）。</p>
+
+<div class="callout">
+  <strong>GDS 的前提条件：</strong>要使用 GPU Direct Storage，整个数据链路每一步都必须支持：存储端需要支持 RDMA 的 NVMe-oF（NVMe over Fabrics，通过网络访问 NVMe 存储的协议）或本地 NVMe、网络需要 RDMA（InfiniBand 或 RoCE）、GPU 端需要 NVIDIA 的 GPUDirect RDMA 支持。这也是 NVIDIA 全栈整合的又一个例子——从存储到 GPU 全程可控。
+</div>
+
+<h3>典型存储需求：1000 卡集群要配多少存储？</h3>
+
+<p>没有放之四海而皆准的数字，但业界有一些参考值：</p>
+
+<table>
+  <tr><th>指标</th><th>典型范围</th><th>说明</th></tr>
+  <tr><td>总读取吞吐量</td><td>100-300 GB/s</td><td>1000 张 H100 同时训练大语言模型时的持续读取需求。如果读得不够快，GPU 利用率掉到 60% 以下很常见</td></tr>
+  <tr><td>热存储容量</td><td>2-5 PB（有效）</td><td>训练中需要高速访问的数据。全 NVMe SSD，通常配置 RAID 或纠删码后按净可用容量计</td></tr>
+  <tr><td>总裸容量</td><td>50-100 PB</td><td>含温数据和冷数据的原始磁盘容量。考虑数据保护（3副本或纠删码）后，实际可用约 30%-50%</td></tr>
+  <tr><td>总写入吞吐量</td><td>30-100 GB/s</td><td>保存 checkpoint 时的写入需求。checkpoint 文件很大（一个千亿参数模型的 checkpoint 约 1-2 TB），需要在几十秒内写完</td></tr>
+  <tr><td>元数据性能</td><td>100K+ IOPS</td><td>数据集里可能有几百万个小文件（图像训练）。每个文件都要查目录、读元数据，元数据服务器性能不能拖后腿</td></tr>
+</table>
+
+<div class="callout warn">
+  <strong>Checkpoint 的隐藏成本：</strong>训练过程中，每 N 轮迭代要保存一次 checkpoint（模型参数的快照），防止中途崩溃丢失所有进度。一个千亿参数模型的 checkpoint 约 1-2 TB，写一个 checkpoint 需要几十秒。如果 8000 张 GPU 因为你等 checkpoint 写完而空转 30 秒，你浪费了 240,000 GPU 秒。所以 checkpoint 写入速度也是存储系统的关键指标——写得太慢等于烧钱。
+</div>
+
+<h2>品牌与产品对比</h2>
+
+<p>存储系统市场玩家众多，技术路线各异。下面按厂商逐一梳理：</p>
+
+<table>
+  <tr><th>厂商</th><th>产品</th><th>类型</th><th>定位</th></tr>
+  <tr>
+    <td><strong>DDN</strong></td>
+    <td>A³I（AI³）</td>
+    <td>并行 FS 一体机</td>
+    <td>AI 存储领域的市场份额很高。基于 Lustre，但包装成开箱即用的一体机，客户不用自己折腾 Lustre 部署。NVIDIA 的官方合作伙伴，很多 DGX SuperPOD 的参考架构里标配 DDN 存储</td>
+  </tr>
+  <tr>
+    <td><strong>Pure Storage</strong></td>
+    <td>FlashBlade</td>
+    <td>全闪存 NAS</td>
+    <td>专为文件和对象存储设计的全闪存阵列。密度高（4U 机箱可放大量闪存模块），管理极其简单。不做并行文件系统，但在中小规模 AI 集群里以"省心"著称</td>
+  </tr>
+  <tr>
+    <td><strong>NetApp</strong></td>
+    <td>ONTAP AI</td>
+    <td>统一存储</td>
+    <td>老牌存储厂商。ONTAP 是它的核心操作系统，支持文件（NFS/SMB）、块（iSCSI/FC）、对象（S3）三种协议。混合云能力强——可以在本地和云上（AWS、Azure、GCP）之间无缝迁移数据。数据管理功能（快照、克隆、复制）成熟完善</td>
+  </tr>
+  <tr>
+    <td><strong>Dell</strong></td>
+    <td>PowerScale（原 Isilon）</td>
+    <td>横向扩展 NAS</td>
+    <td>Isilon 是 scale-out NAS 的鼻祖，2010 年被 EMC 收购，2016 年随 EMC 并入 Dell 后改名 PowerScale。节点式扩展——加节点就加容量和性能。企业级功能成熟，但极限吞吐量不如专门的并行文件系统</td>
+  </tr>
+  <tr>
+    <td><strong>华为</strong></td>
+    <td>OceanStor Pacific</td>
+    <td>并行 FS</td>
+    <td>国产替代的主力选手。原生并行文件系统，支持 NVMe 全闪存和混合配置。已在国内多个智算中心部署。与华为昇腾 GPU + CloudEngine 交换机组成国产全栈方案</td>
+  </tr>
+  <tr>
+    <td><strong>VAST Data</strong></td>
+    <td>Data Platform</td>
+    <td>全闪存并行</td>
+    <td>新锐厂商，架构创新激进——全 NVMe 闪存 + 存储级内存（SCM）做写缓存 + QLC（四层单元闪存，一种高密度低成本闪存）做容量层 + 纠删码保护。不做传统的"分层"而是让所有数据看起来都像快存储。在生成式 AI 领域增长很快</td>
+  </tr>
+</table>
+
+<h3>各厂商叙事：它们怎么定位自己</h3>
+
+<p><strong>DDN：</strong>"我们是做超算存储出身的，Top500 里大部分用 Lustre。现在 AI 需要的东西——超高吞吐、大规模并行——和超算一模一样。我们不做通用存储，只做高性能计算的存储。"DDN 的优势在于和 NVIDIA 的深度绑定，DGX 客户几乎不可避免会接触到它。</p>
+
+<p><strong>Pure Storage：</strong>"并行文件系统确实快，但你有 Lustre 专家吗？FlashBlade 插上电就能用，管理界面直观得像手机 App。不是每个 AI 团队都需要极致性能，多数场景下易用性比多争取 10% 的带宽更重要。"Pure 的策略是吃掉"不想碰 Lustre 的用户"这块市场。</p>
+
+<p><strong>NetApp：</strong>"AI 数据不只是训练的时候用到。数据怎么采集、整理、版本管理、跨团队共享、备份——这些都是训练之前和之后的事情。ONTAP 在企业数据管理上有多年的积累，AI 工作流需要的不只是快，还有全生命周期的管理能力。"</p>
+
+<p><strong>华为：</strong>"国产化的全栈唯一选择。昇腾 GPU + 海思交换机 + OceanStor 存储，从芯片到软件全部自主。性能对比国际一线有差距，但在'自主可控'这个前提下，华为是唯一能提供完整方案的公司。"</p>
+
+<p><strong>VAST Data：</strong>零售行业很少看到存储公司高举"架构创新"大旗，VAST Data 是个例外。它的底层思路很特别——过去存储系统的分层是用不同的设备"手动"定义冷热，VAST 的做法是把所有数据都放在一个统一的闪存池里，通过软件智能管理。对 AI 客户来说，体验就是"不用操心数据放哪里，随便读都很快"。</p>
+
+<div class="callout warn">
+  <strong>成本认知：</strong>存储通常只占集群总成本的 5%-10%。但<strong>如果不配够，它会是拖慢整个集群的最大瓶颈</strong>。GPU 利用率从 90% 掉到 60%，你每年多付几千万的电费和 GPU 折旧。存储省下来的几百万，在算力浪费面前微不足道。很多项目在规划时 GPU 预算充足、存储预算抠门，上线后才发现 GPU 空转——这时候加存储已经晚了，因为架构设计阶段就定了。
+</div>
+
+<h2>怎么选：给非技术决策者的建议</h2>
+
+<ul>
+  <li><strong>小规模（几十张卡，推理为主）：</strong>一台高性能 NAS（如 Pure FlashBlade 或 Dell PowerScale）就够。不需要并行文件系统的复杂度。</li>
+  <li><strong>中等规模（几百张卡，训练 + 推理）：</strong>可以考虑 WekaFS 或 DDN 一体机。不想自己维护 Lustre 但又能获得并行文件系统的性能。</li>
+  <li><strong>大规模（千卡以上，大模型训练）：</strong>并行文件系统几乎必选。Lustre（通过 DDN 一体机）是目前最成熟的方案。国产场景选华为 OceanStor Pacific。</li>
+  <li><strong>预算充足 + 技术团队强：</strong>可以自建开源 Lustre。节省商业许可费，但需要至少一名经验丰富的 Lustre 管理员。</li>
+  <li><strong>国产自主可控：</strong>华为 OceanStor Pacific + 昇腾 GPU。备选：曙光 ParaStor（另一种国产并行文件系统）。</li>
+</ul>
+
+<div class="summary-box">
+  <h3>阶段 4 总结</h3>
+  <p>AI 训练存储的核心不是"仓库"而是"传送带"——关键指标不是容量多大，而是输送速度多快。</p>
+  <ul>
+    <li><strong>吞吐量优先于 IOPS：</strong>AI 训练是顺序读取大文件（像货运列车），不是随机读写小文件（像快递员）。存储选型要追 GB/s 而不是 IOPS</li>
+    <li><strong>并行文件系统让带宽线性扩展：</strong>数据和存储服务器同时参与服务，每加一台就加一份带宽。Lustre 是开源标杆，WekaFS 是新锐替代</li>
+    <li><strong>GPU Direct Storage 让数据直达 GPU：</strong>绕过 CPU 和系统内存，延迟更低、CPU 负载更小</li>
+    <li><strong>存储分层是成本控制的关键：</strong>热数据用 NVMe 全闪存（贵但快），冷数据用机械硬盘或对象存储（便宜但慢），不分层的成本高 5-10 倍</li>
+    <li><strong>1000 张 H100 集群需要 100-300 GB/s 读吞吐、50-100 PB 总容量：</strong>存储只占总成本 5%-10%，但配不够会让 GPU 大量空转，省小钱亏大钱</li>
+    <li><strong>NVMe 全闪存正在取代机械硬盘成为 AI 训练标配：</strong>传统 HPC 用 Lustre + 机械盘，AI 训练用 Lustre/WekaFS + 全闪存——数据传送带升级了</li>
+  </ul>
+</div>
+
+<h2>延伸阅读</h2>
+
+<ul>
+  <li><a href="https://www.weka.io/" target="_blank">WekaFS 官网</a> — 了解专门为 AI 工作负载设计的并行文件系统的架构和性能特性</li>
+  <li><strong>"GPU Direct Storage: A Direct Path to GPU Memory"</strong> — NVIDIA 官方技术博客，详细解释 GDS 的工作原理和性能收益</li>
+  <li><a href="https://www.ddn.com/" target="_blank">DDN 官网</a> — 查看 A³I 产品的参考架构和白皮书，了解 DGX SuperPOD 的存储配置实践</li>
+</ul>
+
+<p style="margin-top: 32px; font-size: 14px; color: var(--color-muted);">
+  <a href="05-cooling-power.html">下一阶段：散热与供电 →</a>
+</p>
+
+</main>
+
+<script src="../js/nav.js"></script>
+</body>
+</html>

@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>智算中心服务器全栈知识</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<nav class="sidebar">
+  <h2>智算中心服务器<br>全栈知识</h2>
+
+  <div class="stage-title">阶段 1</div>
+  <a href="stages/01-overview.html">全景图：什么是智算中心</a>
+
+  <div class="stage-title">阶段 2 · 算力</div>
+  <a href="stages/02-1-gpu-chips.html">GPU 芯片</a>
+  <a href="stages/02-2-memory.html">内存系统</a>
+  <a href="stages/02-3-gpu-servers.html">GPU 服务器整机</a>
+
+  <div class="stage-title">阶段 3 · 网络</div>
+  <a href="stages/03-network.html">网络互联</a>
+
+  <div class="stage-title">阶段 4 · 存储</div>
+  <a href="stages/04-storage.html">存储系统</a>
+
+  <div class="stage-title">阶段 5 · 基础设施</div>
+  <a href="stages/05-cooling-power.html">散热与供电</a>
+
+  <div class="stage-title">阶段 6 · 软件栈</div>
+  <a href="stages/06-1-drivers.html">驱动与加速层</a>
+  <a href="stages/06-2-containers.html">容器与资源调度</a>
+  <a href="stages/06-3-training.html">分布式训练框架</a>
+  <a href="stages/06-4-inference.html">推理引擎</a>
+  <a href="stages/06-5-monitoring.html">集群管理与监控</a>
+
+  <div class="stage-title">总结</div>
+  <a href="stages/07-summary.html">完整参考架构</a>
+</nav>
+
+<main class="main">
+  <h1>智算中心服务器：从零到全栈</h1>
+  <p>一份为初学者准备的知识体系。从"训练一个大模型到底需要什么"出发，逐层深入，覆盖芯片、服务器、网络、存储、散热到软件栈的全链路。</p>
+
+  <h2>学习路线</h2>
+  <div class="concept-cards">
+    <div class="concept-card">
+      <h4>阶段 1 · 全景图</h4>
+      <p>智算中心是什么？为什么大模型需要专门的数据中心？训练和推理有什么区别？</p>
+    </div>
+    <div class="concept-card">
+      <h4>阶段 2 · 算力</h4>
+      <p>GPU 芯片、显存（HBM）、内存、服务器整机——AI 服务器的"肌肉"，以及各大品牌怎么选。</p>
+    </div>
+    <div class="concept-card">
+      <h4>阶段 3 · 网络</h4>
+      <p>几千张 GPU 怎么连在一起协同工作？InfiniBand、RoCE、光模块和交换机。</p>
+    </div>
+    <div class="concept-card">
+      <h4>阶段 4 · 存储</h4>
+      <p>PB 级训练数据怎么存、怎么高速读取？并行文件系统和分层存储。</p>
+    </div>
+    <div class="concept-card">
+      <h4>阶段 5 · 基础设施</h4>
+      <p>一张 GPU 700W，一万张卡怎么散热和供电？液冷、PUE 和供电架构。</p>
+    </div>
+    <div class="concept-card">
+      <h4>阶段 6 · 软件栈</h4>
+      <p>CUDA → 容器 → 训练框架 → 推理引擎 → 集群监控，从底层驱动到上层应用全链路。</p>
+    </div>
+  </div>
+
+  <div class="callout">
+    <strong>怎么看这份文档？</strong><br>
+    按左侧导航从上到下阅读，每一篇都从"为什么需要它"开始。每个专业名词首次出现时都有白话解释。<br>
+    如果你是非技术岗位（如销售、产品），建议重点看 <strong>阶段 1–5</strong>（硬件与基础设施），这是客户最常问的部分。
+  </div>
+
+  <h2>品牌速查</h2>
+  <table>
+    <tr><th>领域</th><th>主要品牌</th></tr>
+    <tr><td>GPU 芯片</td><td>NVIDIA、AMD、华为昇腾、Intel</td></tr>
+    <tr><td>显存（HBM）</td><td>SK 海力士、三星、美光</td></tr>
+    <tr><td>服务器内存（DRAM）</td><td>三星、SK 海力士、美光</td></tr>
+    <tr><td>GPU 服务器</td><td>Dell、HPE、联想、浪潮、超微、华为</td></tr>
+    <tr><td>网络交换机</td><td>NVIDIA/Mellanox、Broadcom、华为、Cisco</td></tr>
+    <tr><td>光模块</td><td>中际旭创、Finisar、Coherent</td></tr>
+    <tr><td>存储</td><td>DDN、Dell、HPE、华为、Pure Storage、NetApp</td></tr>
+    <tr><td>液冷</td><td>CoolIT、台达、曙光数创、Vertiv</td></tr>
+  </table>
+
+  <h2>为什么用场景驱动？</h2>
+  <p>传统的学习方式是"先讲概念，再讲原理，最后讲应用"。但对于一个全新的领域，你不知道哪些概念重要、哪些可以略过。</p>
+  <p>场景驱动的做法反过来：<strong>先告诉你"我要解决什么问题"，再告诉你"用什么来解决"。</strong>这样每一步你都清楚学它的意义。</p>
+
+  <p>我们从一个具体场景出发——<strong>"训练一个千亿参数的大模型"</strong>——看看这一路上需要什么。</p>
+</main>
+
+<script src="js/nav.js"></script>
+</body>
+</html>

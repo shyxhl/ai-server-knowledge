@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>内存系统 — 智算中心服务器全栈知识</title>
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+
+<nav class="sidebar">
+  <h2>智算中心服务器<br>全栈知识</h2>
+  <div class="stage-title">阶段 1</div>
+  <a href="01-overview.html">全景图：什么是智算中心</a>
+  <div class="stage-title">阶段 2 · 算力</div>
+  <a href="02-1-gpu-chips.html">GPU 芯片</a>
+  <a href="02-2-memory.html">内存系统</a>
+  <a href="02-3-gpu-servers.html">GPU 服务器整机</a>
+  <div class="stage-title">阶段 3 · 网络</div>
+  <a href="03-network.html">网络互联</a>
+  <div class="stage-title">阶段 4 · 存储</div>
+  <a href="04-storage.html">存储系统</a>
+  <div class="stage-title">阶段 5 · 基础设施</div>
+  <a href="05-cooling-power.html">散热与供电</a>
+  <div class="stage-title">阶段 6 · 软件栈</div>
+  <a href="06-1-drivers.html">驱动与加速层</a>
+  <a href="06-2-containers.html">容器与资源调度</a>
+  <a href="06-3-training.html">分布式训练框架</a>
+  <a href="06-4-inference.html">推理引擎</a>
+  <a href="06-5-monitoring.html">集群管理与监控</a>
+  <div class="stage-title">总结</div>
+  <a href="07-summary.html">完整参考架构</a>
+</nav>
+
+<main class="main">
+
+<h1>内存系统：GPU 显存与服务器内存</h1>
+
+<p>上一节我们讲了 GPU 芯片——大模型的"发动机"。这一节讲一个同样关键、但经常被初学者忽略的东西：<strong>内存（Memory）</strong>。算力再强，数据喂不进去，一切白搭。</p>
+
+<h2>场景导入：一张 H100 装不下 Llama 3</h2>
+
+<p>Meta 在 2024 年发布的开源大模型 <strong>Llama 3 70B</strong>（70B 即 700 亿参数）——这已经算是"中等偏大"的模型。用 <strong>FP16</strong>（16 位浮点数，一种半精度数据格式，每个参数占 2 字节）存储，光是模型参数就需要 <strong>140GB 显存</strong>。</p>
+
+<p>而一张 NVIDIA H100 GPU（当前 AI 训练最主流的卡）的显存是 <strong>80GB</strong>。一张卡连模型都装不下，更别提训练了。</p>
+
+<p>再算一笔账：GPT-3 有 1750 亿参数（175B），FP16 格式需要 350GB。训练时还需要额外存储优化器状态（optimizer states）、中间激活值（activations，网络前向传播时产生的临时数据）和梯度（gradients，反向传播计算的参数更新量）。实际训练预算大约是参数量的 <strong>4 到 6 倍</strong>——GPT-3 训练需要约 1.4TB 显存，也就是 <strong>18 张 H100</strong>。</p>
+
+<p>这就是内存问题为什么重要：<strong>模型能不能跑起来，很多时候不取决于算力，而取决于内存。</strong></p>
+
+<h2>核心概念一：GPU 显存——HBM（高带宽内存）</h2>
+
+<p>先明确两个概念，初学者最容易混淆：</p>
+
+<table>
+  <tr><th>类型</th><th>位置</th><th>做什么</th><th>代表技术</th></tr>
+  <tr><td>GPU 显存（VRAM）</td><td>紧挨 GPU 芯片</td><td>存放模型参数、中间结果等 GPU 直接操作的数据</td><td>HBM</td></tr>
+  <tr><td>服务器主内存（DRAM）</td><td>连在 CPU 上</td><td>数据预处理、模型加载前的暂存、CPU-GPU 数据搬运</td><td>DDR5</td></tr>
+</table>
+
+<p><strong>GPU 显存不出现在主板上，它直接焊接在 GPU 封装内部，紧挨着芯片。</strong>这和你的笔记本电脑完全不一样——笔记本电脑的 DDR5 内存条插在主板上，离 CPU 有几厘米的距离；HBM 和 GPU 的距离是毫米级的。</p>
+
+<h3>HBM 是什么？</h3>
+
+<p><strong>HBM（High Bandwidth Memory，高带宽内存）</strong>是一种把多层 DRAM 芯片垂直堆叠起来，再通过极细的导线（直径相当于头发丝的千分之一）穿透硅片层与层之间直接连接的技术。这些垂直导线叫 <strong>TSV（Through-Silicon Via，硅通孔）</strong>。</p>
+
+<p>打个比方：</p>
+<ul>
+  <li>传统的 DDR5 内存是<strong>郊区平房</strong>——每个内存芯片平铺在电路板上，芯片之间通过电路板上的铜线通信。占地面积大、距离远、速度慢。</li>
+  <li>HBM 是<strong>摩天大楼</strong>——8 到 12 层 DRAM 芯片垂直堆叠，层之间用 TSV 微导线直连。占地小、距离极短、速度极快。</li>
+</ul>
+
+<p>你可以把 HBM 想象成一个超级压缩的三明治：底层是 GPU 核心芯片，上面压着 8 层 DRAM 存储芯片，层与层之间密密麻麻的垂直导线把数据通路拉到最短。</p>
+
+<h3>为什么"高带宽"这么重要？</h3>
+
+<p>带宽（Bandwidth）是指单位时间内能传输多少数据，单位是 GB/s（每秒多少 GB）。</p>
+
+<p>GPU 在做矩阵乘法（AI 计算的核心操作）时，每个时钟周期都要从显存中读取海量数据。如果显存带宽不够，GPU 算得再快也没用——它只能干等着数据送进来。这就像你有一台最高时速 300 公里的跑车，但路窄得只能开 30 公里/小时。</p>
+
+<p>做一个直观的对比：</p>
+
+<table>
+  <tr><th>内存类型</th><th>典型带宽</th><th>类比</th></tr>
+  <tr><td>普通 DDR5-5600</td><td>约 45 GB/s（单通道）</td><td>花园水管</td></tr>
+  <tr><td>HBM2e（A100 使用）</td><td>约 2 TB/s</td><td>消防水管</td></tr>
+  <tr><td>HBM3（H100 使用）</td><td>约 3.35 TB/s</td><td>泄洪闸</td></tr>
+</table>
+
+<p>HBM3 的带宽是普通 DDR5 的 <strong>70 倍以上</strong>。这就是为什么 AI GPU 必须用 HBM——没有其他任何内存技术能在这么小的体积内提供这么大的数据传输量。</p>
+
+<h3>HBM 的演进</h3>
+
+<table>
+  <tr><th>代际</th><th>推出年份</th><th>单堆栈带宽</th><th>单堆栈容量</th><th>代表 GPU</th></tr>
+  <tr><td>HBM2</td><td>2016</td><td>307 GB/s</td><td>8 GB</td><td>V100（32GB 版）</td></tr>
+  <tr><td>HBM2e</td><td>2020</td><td>460 GB/s</td><td>16 GB</td><td>A100（80GB 版用 5 堆栈）</td></tr>
+  <tr><td>HBM3</td><td>2022</td><td>819 GB/s</td><td>24 GB</td><td>H100（80GB 版用 5 堆栈）</td></tr>
+  <tr><td>HBM3e</td><td>2024</td><td>1.2 TB/s</td><td>36 GB</td><td>H200、B200</td></tr>
+</table>
+
+<p>解释一下：一张 H100 的 80GB 显存，不是一整块 80GB 的芯片。它是 5 个 HBM3 堆栈围绕在 GPU 芯片周围，每个堆栈 16GB（5 x 16 = 80）。到了 H200 和 B200，每个堆栈提升到 36GB，6 个堆栈就是 144GB，这也是为什么 H200 显存达到 141GB、B200 达到 192GB。</p>
+
+<div class="callout">
+  <strong>一个堆栈 = 一个 HBM"方块"。</strong><br>
+  如果看 GPU 芯片的裸片照片，你能看到 GPU 核心芯片在中间，四周围着 4 到 6 个长方形的小方块——那些就是 HBM 堆栈。它们和 GPU 通过一块硅中介层（silicon interposer）连接，整个封装像一个托盘把他们都托在一起。
+</div>
+
+<h3>内存墙（Memory Wall）</h3>
+
+<p><strong>内存墙</strong>是 AI 计算领域最核心的瓶颈之一。它的意思是：过去二十年，计算能力的增长速度远远超过了内存带宽的增长速度。</p>
+
+<p>GPU 的算力（FLOPS，每秒浮点运算次数，指计算速度）每两年翻一番；而内存带宽每三年才翻一番。这两条曲线的差距越拉越大，意味着 GPU 花越来越多的时间在<strong>等待数据</strong>，而非<strong>处理数据</strong>。</p>
+
+<p>解决内存墙的努力方向有几个：</p>
+<ul>
+  <li><strong>HBM 迭代</strong>：HBM3 → HBM3e → HBM4（预计 2026 年），持续推高带宽</li>
+  <li><strong>近存计算（Near-Memory Computing）</strong>：把部分简单计算直接放在内存旁边甚至内存内部完成，减少数据搬运</li>
+  <li><strong>更大的片上缓存（SRAM）</strong>：GPU 芯片内部本身就有一小块极快的缓存，越做越大</li>
+  <li><strong>量化和压缩</strong>：用更少的比特数表示一个参数（比如 INT8 甚至 INT4 代替 FP16），减少内存占用和传输量</li>
+</ul>
+
+<div class="callout warn">
+  <strong>核心矛盾</strong><br>
+  AI 模型的尺寸增长速度比 HBM 的容量增长速度更快。2020 年的 GPT-3 是 175B 参数，2024 年的模型已经奔着万亿参数去了。内存技术的进步再快也赶不上，唯一现实的办法是用更多 GPU 分担——这就引出了下一节的 GPU 集群和网络互联。
+</div>
+
+<h2>核心概念二：服务器主内存——DRAM</h2>
+
+<p>说完 GPU 的"专属内存"，再来说服务器上的普通内存——<strong>DRAM（Dynamic Random Access Memory，动态随机存取存储器）</strong>。就是你笔记本电脑里插着的内存条的服务器版本。</p>
+
+<p>在 AI 服务器中，DRAM 不直接参与模型计算，但它承担了三件重要的事：</p>
+
+<ol>
+  <li><strong>数据预处理</strong>：训练数据（文本、图片、视频）在被送入 GPU 之前，需要 CPU 做清洗、分词（tokenization，把文字拆成最小处理单元）、增强等处理，这些都在 DRAM 中完成。</li>
+  <li><strong>模型加载</strong>：当你从硬盘或网络存储读取模型文件时，数据先加载到 DRAM，再由 DRAM 通过 PCIe 总线搬运到 GPU 显存。</li>
+  <li><strong>CPU-GPU 数据搬运缓冲</strong>：训练过程中，CPU 需要不断地准备下一批数据（data loader），DRAM 作为中转站，确保数据流不断档。</li>
+</ol>
+
+<p>当前 AI 服务器主流的 DRAM 规格是 <strong>DDR5</strong>（第五代双倍数据速率内存）。单条 DDR5 通常是 64GB 或 128GB，一台双路 CPU 的 GPU 服务器可以插 12 到 24 条，总量在 768GB 到 3TB 之间。</p>
+
+<h3>CXL：内存共享的新思路</h3>
+
+<p><strong>CXL（Compute Express Link，计算快速链接）</strong>是一种新的通信协议，建立在 PCIe 物理层之上。它的核心想法很简单：</p>
+
+<p>传统服务器中，每台机器有自己的固定内存，用不完就浪费，不够就卡死。CXL 让多台服务器可以把内存"池化"（pooling）——组成一个共享的内存池，按需分配。</p>
+
+<p>类比：</p>
+<ul>
+  <li>传统架构：每家有自己的冰箱，你的食材放不下就只能再买一台冰箱，邻居的冰箱空着你也用不了。</li>
+  <li>CXL 架构：一个共享大冷库，每家按需取用，总容量利用率更高。</li>
+</ul>
+
+<p>CXL 目前还在早期部署阶段（CXL 2.0 开始有产品落地），但它对 AI 的意义非常大：</p>
+<ul>
+  <li><strong>解决内存浪费问题</strong>：很多 AI 推理任务不需要 2TB 内存，但偶尔有一个大任务需要 4TB。池化之后不用为每个节点配 4TB。</li>
+  <li><strong>简化数据共享</strong>：多台服务器可同时访问同一块内存区域，省去很多数据复制的开销。</li>
+</ul>
+
+<p>目前 DRAM 市场被三家厂商垄断，和 HBM 市场高度重叠：</p>
+
+<table>
+  <tr><th>厂商</th><th>国家</th><th>DRAM 市占率（约）</th></tr>
+  <tr><td>三星</td><td>韩国</td><td>~40%</td></tr>
+  <tr><td>SK 海力士</td><td>韩国</td><td>~30%</td></tr>
+  <tr><td>美光</td><td>美国</td><td>~25%</td></tr>
+</table>
+
+<h2>关键公式：你的模型需要多少显存？</h2>
+
+<p>这把尺子你必须带在身上：</p>
+
+<div class="callout">
+  <strong>模型参数数量 × 2 字节（FP16） = 最低显存需求</strong><br>
+  这是"只做推理（inference，模型对输入给出输出）、不做训练"时的理论最低值。实际还需要留一些空间给中间计算。
+</div>
+
+<p>几个实际例子：</p>
+
+<table>
+  <tr><th>模型</th><th>参数量</th><th>FP16 理论最低显存</th><th>需要几张 H100（80GB）</th><th>实际推理部署</th></tr>
+  <tr><td>Llama 3 8B</td><td>80 亿</td><td>16 GB</td><td>1 张（裕量很多）</td><td>一张消费级 RTX 4090 就行</td></tr>
+  <tr><td>Llama 3 70B</td><td>700 亿</td><td>140 GB</td><td>2 张（勉强）</td><td>2~4 张 H100 或 A100</td></tr>
+  <tr><td>GPT-3 175B</td><td>1750 亿</td><td>350 GB</td><td>5 张</td><td>实际需要 8~16 张，因为还要考虑 batch size 和 KV cache（推理时缓存键值对，减少重复计算，但额外占用显存）</td></tr>
+  <tr><td>DeepSeek-V2</td><td>2360 亿（总），210 亿（激活）</td><td>约 472 GB（总）</td><td>6 张</td><td>用了 MoE（混合专家架构，每次推理只激活部分参数），实际激活参数只有 21B</td></tr>
+</table>
+
+<div class="callout warn">
+  <strong>训练比推理吃显存得多。</strong><br>
+  训练时除了模型参数本身，还需要存：
+  <ul>
+    <li><strong>优化器状态</strong>（如 Adam 优化器需要存动量 momentum 和二阶矩 variance，各占一份参数量）——FP32 格式，16 字节/参数</li>
+    <li><strong>梯度</strong>——FP16 或 FP32 格式，2~4 字节/参数</li>
+    <li><strong>中间激活值</strong>——取决于 batch size（每次送入模型的数据条数）和序列长度，往往比参数本身还大</li>
+  </ul>
+  <p>实际训练显存需求 ≈ <strong>参数量的 4 到 6 倍</strong>（FP16 混合精度训练时）。也就是说，一个 70B 的模型，训练可能需要 280GB ~ 420GB 显存——至少 4 到 6 张 H100。</p>
+</div>
+
+<h2>技术要点</h2>
+
+<h3>HBM 为什么这么贵？</h3>
+
+<p>HBM 是当前半导体行业最供不应求的产品之一。价格昂贵的原因有四个：</p>
+
+<ol>
+  <li><strong>制造极其复杂</strong>：8 到 12 层 DRAM 芯片需要精确堆叠对齐，TSV 钻孔不能有分毫偏差。一片晶圆上只要一个 TSV 孔打歪了，整个堆栈就报废。良率（yield，一片晶圆上能用的芯片比例）远低于普通 DRAM。</li>
+  <li><strong>产能有限</strong>：全球能做 HBM 的工厂一只手数得过来——SK 海力士、三星、美光各只有几条产线。每扩一条线都投资数十亿美元，建设周期两年以上。</li>
+  <li><strong>AI 需求爆炸</strong>：2022 年底 ChatGPT 引爆大模型竞赛后，全球科技巨头疯狂采购 GPU，HBM 订单排到了 2026 年。</li>
+  <li><strong>和 GPU 强绑定</strong>：HBM 不是插拔件，它是焊接在 GPU 封装内部的。每代 GPU 设计都围绕特定规格的 HBM，换 HBM 意味着重新设计 GPU 封装——NVIDIA 和 HBM 厂商的合作关系极深，新玩家很难切入。</li>
+</ol>
+
+<h3>HBM3e 关键规格</h3>
+
+<ul>
+  <li>每根数据引脚的传输速率：最高 <strong>8 Gbps</strong>（每秒 80 亿次信号）</li>
+  <li>每个堆栈的总带宽：<strong>1.2 TB/s</strong></li>
+  <li>每个堆栈容量：<strong>24GB 到 36GB</strong></li>
+  <li>堆叠层数：8 到 12 层</li>
+  <li>1024 位数据总线宽度（HBM 用非常宽的总线来换取高带宽，普通内存是 64 位）</li>
+</ul>
+
+<h3>硅中介层：HBM 和 GPU 的"托盘"</h3>
+
+<p>HBM 和 GPU 之间怎么连？答案是 <strong>硅中介层（Silicon Interposer）</strong>——一块比手掌还小的硅基板。</p>
+
+<p>可以这样理解：GPU 核心芯片和 4 到 6 个 HBM 堆栈，都倒装焊接在这块硅中介层上。中介层内部有极细的金属线路把 GPU 和每个 HBM 堆栈连接起来。然后这个"硅托盘"再安装到传统封装基板上，外面看到的就是一颗完整的 GPU 产品。</p>
+
+<p>硅中介层的技术门槛很高：需要在硅片上制造比 PCB 电路板上细几百倍的线路（线宽/间距在微米级甚至亚微米级），还需要对接 GPU 和 HBM 之间几千根信号线，任何一根对不准都会导致整个产品报废。</p>
+
+<h2>品牌对比</h2>
+
+<table>
+  <tr><th>厂商</th><th>国家</th><th>HBM 市场地位</th><th>其他</th></tr>
+  <tr>
+    <td>SK 海力士</td>
+    <td>韩国</td>
+    <td><strong>HBM3/HBM3e 市占率第一</strong>，NVIDIA 主要供应商</td>
+    <td>最早量产 HBM3（2022 年 6 月），也是 HBM3e 的首发厂商。约 50% 以上的 HBM 市场份额</td>
+  </tr>
+  <tr>
+    <td>三星</td>
+    <td>韩国</td>
+    <td>第二，同时做 DRAM 和 HBM</td>
+    <td>规模优势大——全球最大内存厂商。HBM3 经过了 NVIDIA 认证周期较长，但 HBM3e 12 层堆叠产品已经通过验证</td>
+  </tr>
+  <tr>
+    <td>美光</td>
+    <td>美国</td>
+    <td>第三，HBM3e 正在追赶</td>
+    <td>唯一美国本土 HBM 供应商，有地缘政治优势。跳过了 HBM3 直接做 HBM3e，2024 年开始向 NVIDIA 供货</td>
+  </tr>
+</table>
+
+<div class="callout warn">
+  <strong>HBM 是 AI 硬件最大的供应链瓶颈之一。</strong><br>
+  NVIDIA 为什么 GPU 一直供不应求？芯片制造（台积电 CoWoS 先进封装）和 HBM 供应是两大制约。HBM 的产能扩张速度跟不上 GPU 的需求增长速度，一台 8 卡 GPU 服务器需要 8 颗 GPU，每颗里面 5~8 个 HBM 堆栈——单台服务器就要消耗 40~64 个 HBM 堆栈。而一个智算中心可能有几千台这样的服务器。<br><br>
+  这也解释了为什么三星和美光拼命想拿到 NVIDIA 的认证——谁拿到 NVIDIA 的 HBM 订单，谁就拿到了 AI 时代的门票。
+</div>
+
+<h2>一张图总结</h2>
+
+<div class="summary-box">
+  <h3>大模型训练，显存就是命根子</h3>
+  <ul>
+    <li><strong>GPU 用 HBM，CPU 用 DDR5 DRAM</strong>——两者分工明确，HBM 管计算、DRAM 管中转。</li>
+    <li><strong>HBM 又贵又难造</strong>——垂直堆叠 + 硅通孔 + 硅中介层，制造复杂度和成本远超普通内存，但 AI 训练非它不可。</li>
+    <li><strong>模型越大，显存需求越大</strong>——推理最低公式：参数数 x 2 字节；训练时还要放大 4~6 倍。</li>
+    <li><strong>显存不够，模型就跑不起来</strong>——这是硬约束，没有绕过的方法。所以大模型必须用多卡并行，把模型"切"到多张 GPU 上。</li>
+    <li><strong>CXL 内存池化可能是未来的解药之一</strong>——让多台服务器共享内存池，减少浪费、提高弹性。</li>
+  </ul>
+</div>
+
+<h2>延伸阅读</h2>
+<ol>
+  <li>AnandTech 对 HBM 的技术解析：<br><em>Understanding HBM: High Bandwidth Memory and Why It Matters</em> — 从头讲清楚 HBM 的电气和物理设计，适合想深入了解 TSV 和硅中介层的读者。</li>
+  <li>SK 海力士 2024 年 HBM 技术白皮书：<br>从 HBM1 到 HBM3e 的技术演进路线图，包含详细的规格对比和制造工艺说明。可在 SK 海力士官网新闻中心找到。</li>
+  <li>NVIDIA H100 白皮书中的内存子系统章节：<br><em>NVIDIA H100 Tensor Core GPU Architecture</em> — 第 4 章"Memory System"详细解释了 H100 的 HBM3 配置、缓存层级设计和内存带宽优化。</li>
+</ol>
+
+</main>
+
+<script src="../js/nav.js"></script>
+</body>
+</html>

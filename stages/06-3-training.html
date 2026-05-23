@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>分布式训练框架 — 智算中心服务器全栈知识</title>
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+
+<nav class="sidebar">
+  <h2>智算中心服务器<br>全栈知识</h2>
+  <div class="stage-title">阶段 1</div>
+  <a href="01-overview.html">全景图：什么是智算中心</a>
+  <div class="stage-title">阶段 2 · 算力</div>
+  <a href="02-1-gpu-chips.html">GPU 芯片</a>
+  <a href="02-2-memory.html">内存系统</a>
+  <a href="02-3-gpu-servers.html">GPU 服务器整机</a>
+  <div class="stage-title">阶段 3 · 网络</div>
+  <a href="03-network.html">网络互联</a>
+  <div class="stage-title">阶段 4 · 存储</div>
+  <a href="04-storage.html">存储系统</a>
+  <div class="stage-title">阶段 5 · 基础设施</div>
+  <a href="05-cooling-power.html">散热与供电</a>
+  <div class="stage-title">阶段 6 · 软件栈</div>
+  <a href="06-1-drivers.html">驱动与加速层</a>
+  <a href="06-2-containers.html">容器与资源调度</a>
+  <a href="06-3-training.html">分布式训练框架</a>
+  <a href="06-4-inference.html">推理引擎</a>
+  <a href="06-5-monitoring.html">集群管理与监控</a>
+  <div class="stage-title">总结</div>
+  <a href="07-summary.html">完整参考架构</a>
+</nav>
+
+<main class="main">
+
+<h1>阶段 6 · 分布式训练框架</h1>
+
+<p>前几章讲了 GPU 硬件、网络、存储、散热供电——这些是<strong>物理层</strong>。但从硬件到真正跑出一个大模型，中间还隔着一整套软件。本章从最核心的问题开始：当一个模型大到单张 GPU 装不下的时候，怎么用很多张 GPU 一起训练？</p>
+
+<h2>场景：1750 亿参数，一张 GPU 连模型都装不下</h2>
+
+<p>假设要训练一个 GPT-3 级别的模型——1750 亿个参数（<strong>参数</strong>是模型内部可调节的数字权重，类似人脑中神经元的"强度值"，数量越大模型能力越强但也越吃资源）。</p>
+
+<p>在 <strong>FP16</strong>（16 位浮点数，一种半精度数字格式，每个数字占 2 字节）下，光模型参数就需要：</p>
+
+<div class="callout">
+  <strong>1750 亿 × 2 字节 = 约 350 GB 显存</strong>
+</div>
+
+<p>但市面上最强的 NVIDIA H100 GPU，单卡显存只有 <strong>80 GB</strong>。也就是说，连一个模型本身都装不下——更别说训练时还需要额外存储<strong>梯度</strong>（gradient，参数该如何调整的方向信息）、<strong>优化器状态</strong>（optimizer states，优化器是训练过程中自动调整参数的算法，它自己也需要记录一批中间数据）和中间计算结果。</p>
+
+<p>把这几个加在一起，训练 GPT-3 实际需要约 <strong>2-3 TB</strong> 的显存。一张 H100 显存的 <strong>25 到 40 倍</strong>。</p>
+
+<p>解决的思路很直接：<strong>把模型切开，分到很多张 GPU 上，让它们一起算。</strong>这就是"分布式训练"的全部出发点。</p>
+
+<p>但这个"切开"有三种完全不同的切法。它们解决不同的问题，也常常组合在一起。理解这三种切法，就理解了分布式训练的核心。</p>
+
+<h2>核心概念：三种切开模型的方式</h2>
+
+<h3>1. 数据并行（Data Parallelism）——每人做一份完整试卷</h3>
+
+<p><strong>类比：</strong>100 个学生，每人拿到一份完整试卷（一模一样），各做各的。做完以后，大家对一下答案，取平均值——这样整体学得比任何一个人单独学更快。</p>
+
+<p><strong>实际做法：</strong></p>
+<ul>
+  <li>每张 GPU 上存放<strong>完整的一套模型参数</strong>（每张卡上的模型一模一样）。</li>
+  <li>训练数据被分成 N 份（N 等于 GPU 数量），每张 GPU 吃自己的那一份数据。</li>
+  <li>每张 GPU 根据自己那份数据算出一个"该如何修改参数"的方案（即<strong>梯度</strong>）。</li>
+  <li>所有 GPU 通过一种叫 <strong>All-Reduce</strong> 的通信算法（所有卡之间交换数据并汇总求和/求平均的通信模式），把各自的梯度加在一起取平均，得到一个统一的梯度。</li>
+  <li>所有 GPU 用这个统一的梯度更新自己的模型。</li>
+  <li>这样一来，虽然每张卡只看到了一小批数据，但参数更新时融合了所有数据的信息——相当于"用全部数据训练了一次"。</li>
+</ul>
+
+<p><strong>数据并行示意图（简化）：</strong></p>
+
+<table>
+  <tr><th>GPU 0</th><th>GPU 1</th><th>GPU 2</th><th>GPU 3</th></tr>
+  <tr><td>完整模型</td><td>完整模型</td><td>完整模型</td><td>完整模型</td></tr>
+  <tr><td>数据批次 1</td><td>数据批次 2</td><td>数据批次 3</td><td>数据批次 4</td></tr>
+  <tr><td>算自己的梯度</td><td>算自己的梯度</td><td>算自己的梯度</td><td>算自己的梯度</td></tr>
+  <tr><td colspan="4" style="text-align:center; background:var(--color-code-bg);">All-Reduce：梯度汇总 → 取平均 → 分发给所有 GPU</td></tr>
+  <tr><td>用平均梯度更新模型</td><td>用平均梯度更新模型</td><td>用平均梯度更新模型</td><td>用平均梯度更新模型</td></tr>
+</table>
+
+<p><strong>优点：</strong>最简单、最通用。几乎所有训练框架都支持。不需要对模型本身做任何修改。</p>
+
+<p><strong>致命缺点：</strong>每张 GPU 都需要存一整套完整的模型参数 + 优化器状态 + 梯度。如果单张 GPU 装不下整套（像 GPT-3 那样），数据并行<strong>完全无法使用</strong>。</p>
+
+<p><strong>数据并行适合什么：</strong>模型本身不大（单卡能装下），但你想用更多 GPU 加速训练。比如在 8 张 GPU 上训练一个 70 亿参数的模型——模型参数约 14 GB（FP16），单张 H100 的 80 GB 显存放得下，数据并行就可以完美工作。</p>
+
+<div class="callout">
+  <strong>一句话总结数据并行：</strong>模型不动，数据拆开。每张卡都有完整模型，各吃各的数据，算完同步梯度。简单好用，但受限于单卡显存。
+</div>
+
+<h3>2. 张量并行（Tensor Parallelism）——一起解一道矩阵乘法</h3>
+
+<p><strong>类比：</strong>4 个学生一起解一道巨大的矩阵乘法题。把矩阵按列切成 4 块，每人算自己那块，需要时互相传递中间结果。虽然每个人只负责一部分，但最终能得到完整结果。</p>
+
+<p>先理解一个关键背景：神经网络中的每一层，本质上是<strong>矩阵乘法</strong>。一个 1750 亿参数的模型，绝大多数参数都存在这些矩阵里。而张量并行就是<strong>把一个大矩阵横着或竖着切开，分到不同 GPU 上分别计算</strong>。</p>
+
+<p><strong>具体做法（以矩阵乘法为例）：</strong></p>
+
+<p>假设有一个矩阵乘法 Y = X × W。其中 X 是输入数据矩阵（比如 2048 行 × 8192 列），W 是权重矩阵（8192 × 8192），结果 Y 是（2048 × 8192）。</p>
+
+<p>张量并行有两种切法：</p>
+
+<ul>
+  <li><strong>按列切（Column-wise）：</strong>把 W 纵向切成两块，W = [W₁ | W₂]，每块是 8192 × 4096。GPU 0 有 W₁，GPU 1 有 W₂。两张卡同时收到完整的 X，各自算 X × W₁ = Y₁ 和 X × W₂ = Y₂。最后把 Y₁ 和 Y₂ 拼在一起就是完整答案。</li>
+  <li><strong>按行切（Row-wise）：</strong>把 W 横向切成两块。GPU 0 算上半部分，GPU 1 算下半部分。输入 X 也需要相应切开。最后两部分结果加起来。</li>
+</ul>
+
+<p><strong>关键代价：通信。</strong>切完之后，GPU 之间必须频繁传中间结果——每计算一层就要传一次。这就要求 GPU 之间的通信速度必须<strong>极快</strong>。</p>
+
+<p>在实际的 Transformer 模型（GPT 这类模型的基础架构）中，张量并行通常这样做：</p>
+
+<ul>
+  <li>在 <strong>自注意力层</strong>（self-attention，模型用来理解词语之间关系的核心计算）中，把查询（Q）、键（K）、值（V）三个矩阵按列切，分给不同 GPU。每张 GPU 算一部分注意力，然后合并。</li>
+  <li>在 <strong>前馈网络层</strong>（feed-forward network，对每个词语独立再做一次变换）中，第一层按列切，第二层按行切——目的是让通信负担尽可能小。</li>
+</ul>
+
+<p><strong>为什么张量并行要求 GPU 之间通信极快？</strong></p>
+
+<p>因为切矩阵只是把计算量分开了，但结果必须拼回完整。每计算一个 Transformer 层，至少需要 2 次 All-Reduce 通信。比数据并行（每个训练步才通信一次）频繁得多。</p>
+
+<p>这意味着张量并行只能在<strong>同一台服务器内部</strong>（通过 NVLink 或 NVSwitch 互联的 GPU 之间）高效工作。NVLink 的速度是 900 GB/s，而跨服务器的网络（如 RoCE 或 InfiniBand）只有 400 GB/s——差了约 2 倍。所以张量并行通常限制在一台服务器内的 8 张 GPU。</p>
+
+<div class="callout warn">
+  <strong>张量并行的核心限制：</strong>通信开销极大。切得越细（GPU 越多），每个人算的越少，但需要通信的次数越多。到了一定程度，通信时间超过了计算节约的时间，再加 GPU 反而变慢。实践中，每 2-8 张 GPU 做张量并行就差不多了，很少跨服务器。
+</div>
+
+<p><strong>张量并行适合什么：</strong>模型中的某一个矩阵大到单张 GPU 放不下，但你又不想把整个层切断——就切单个矩阵。通常与流水线并行（下面要讲）组合使用。</p>
+
+<div class="callout">
+  <strong>一句话总结张量并行：</strong>把模型内部的大矩阵切开，多张 GPU 分别算自己那块，最后拼在一起。计算快但通信代价高，适合同一台服务器内的高速 GPU 之间。
+</div>
+
+<h3>3. 流水线并行（Pipeline Parallelism）——工厂流水线</h3>
+
+<p><strong>类比：</strong>工厂流水线。第 1 个工人做前 10 道工序，做完传给第 2 个工人做第 11-20 道工序，再传给第 3 个工人做第 21-30 道……产品在流水线上从头传到尾。</p>
+
+<p><strong>实际做法：</strong></p>
+
+<ul>
+  <li>把模型按层切分。假设一个 Transformer 模型有 96 层（GPT-3 就是 96 层），8 张 GPU 每张负责 12 层。</li>
+  <li>数据从 GPU 0 进入，经过 1-12 层处理，中间结果传给 GPU 1；GPU 1 处理 13-24 层，传给 GPU 2……直到 GPU 7 处理完最后 12 层，输出最终结果。</li>
+  <li>这和工厂流水线一模一样：第一个工人一直在做前 12 层的活，最后一个工人一直在做最后 12 层的活。</li>
+</ul>
+
+<p><strong>流水线并行示意图：</strong></p>
+
+<table>
+  <tr><th>GPU 0</th><th>GPU 1</th><th>GPU 2</th><th>……</th><th>GPU 7</th></tr>
+  <tr><td>第 1-12 层</td><td>第 13-24 层</td><td>第 25-36 层</td><td>……</td><td>第 85-96 层</td></tr>
+  <tr><td colspan="5" style="text-align:center; background:var(--color-code-bg);">数据流向：GPU 0 → GPU 1 → GPU 2 → …… → GPU 7</td></tr>
+</table>
+
+<p><strong>流水线并行的最大问题：气泡（Bubble）。</strong></p>
+
+<p>想象流水线的启动阶段：</p>
+<ul>
+  <li>第一批数据进来，GPU 0 开始算第 1-12 层。此时 GPU 1、2……7 全部<strong>闲着</strong>。</li>
+  <li>GPU 0 算完 12 层，传给 GPU 1。GPU 0 开始处理第二批数据，GPU 1 开始处理第一批的第 13-24 层。此时 GPU 2-7 仍然<strong>闲着</strong>。</li>
+  <li>等第一批数据终于"走"到 GPU 7，时间已经过去了很久。在这个"预热"阶段，前面的 GPU 干完一批等下一批，后面的 GPU 一批还没到——CPU 和 GPU 都有空转时间。这些空转就叫<strong>气泡</strong>。</li>
+</ul>
+
+<p>气泡越严重，GPU 的利用率越低。如果分 8 段，在最坏情况下，有接近一半的 GPU 时间在空等。</p>
+
+<p><strong>解决方案：微批次（Micro-Batching）。</strong></p>
+
+<p>不把一批数据一次性喂进去。而是把一个批次切成更小的"微批次"：</p>
+
+<ul>
+  <li>比如原来一个批次是 64 个样本，切成 4 个微批次，每个 16 个样本。</li>
+  <li>GPU 0 算完微批次 1 立刻传给 GPU 1，然后马上开始算微批次 2。GPU 1 收到微批次 1 立刻开始算，不用等所有微批次都到齐。</li>
+  <li>这样流水线"填得更满"，气泡大幅减少。</li>
+</ul>
+
+<p>微批次之间的关系：虽然分成小块计算，但梯度（参数调整信息）是<strong>等到所有微批次都走完流水线后再统一归总使用的</strong>。也就是说，把一个大问题拆成小块分批处理，但回头还是当一个大问题来总结结论。这样既减少了等待时间，又不损失训练的数学正确性。</p>
+
+<div class="callout">
+  <strong>一句话总结流水线并行：</strong>模型垂直切开——GPU 0 管前面几层、GPU 1 管中间几层、GPU 2 管后面几层。数据像流水线上的产品一样从前往后传递。通信少（只有层与层之间的交接），但有"气泡"问题，用微批次缓解。
+</div>
+
+<h3>三种并行的对比</h3>
+
+<table>
+  <tr><th>并行方式</th><th>切什么</th><th>类比</th><th>通信频率</th><th>通信带宽要求</th><th>主要限制</th></tr>
+  <tr><td>数据并行（DP）</td><td>切数据</td><td>每人做完整试卷</td><td>低（每步一次）</td><td>中</td><td>单卡必须装下整个模型</td></tr>
+  <tr><td>张量并行（TP）</td><td>切矩阵</td><td>一起解一道矩阵乘法</td><td>极高（每层多次）</td><td>极高（需 NVLink）</td><td>仅限同机箱内 8 卡</td></tr>
+  <tr><td>流水线并行（PP）</td><td>切层</td><td>工厂流水线</td><td>低（层间交接）</td><td>低</td><td>有气泡，需微批次优化</td></tr>
+</table>
+
+<h3>4. 3D 并行——三种策略组合在一起</h3>
+
+<p>训练真正的大模型时，从来不会只用一种方式。三种并行策略组合起来使用，叫 <strong>3D 并行</strong>（3D Parallelism）：</p>
+
+<ul>
+  <li><strong>张量并行</strong>（TP）：一台服务器内部的 8 张 GPU 之间。每层内的矩阵切开。</li>
+  <li><strong>流水线并行</strong>（PP）：不同服务器之间。模型层切开，服务器 1 管前几十层，服务器 2 管后几十层。</li>
+  <li><strong>数据并行</strong>（DP）：在最外层。以上每个"TP+PP 组"构成一个完整的模型副本。多组副本并行处理不同数据——这些数据并行组之间通过跨服务器网络进行 All-Reduce 梯度同步。</li>
+</ul>
+
+<p>以训练 GPT-3 为例，Meta 的实际配置大致是：每台服务器 8 张 GPU 做张量并行（TP=8），15 台服务器做流水线并行（PP=15），总共 120 张 GPU 构成一个模型副本。如果还要更快，就再加一组 120 张 GPU 做数据并行——一共 240 张。</p>
+
+<p>这就像一个大工程：每个车间（一台服务器 8 卡）内部按工序高度协作（TP），车间与车间之间按流水线传递产品（PP），而多个工厂同时开工生产不同批次的产品（DP）。</p>
+
+<div class="callout warn">
+  <strong>3D 并行的部署是一个复杂的排列组合问题：</strong>给定 1024 张 GPU，怎么分配 TP、PP、DP 各自用多少张？TP 太大通信爆炸，TP 太小单卡放不下。PP 太大气泡严重，PP 太小模型放不下。DP 越多扩展性越好但需要 GPU 总数能整除。这个"调参"至今仍需要大量工程经验，没有一键最优解。
+</div>
+
+<h2>ZeRO：不切模型，而是"去重"</h2>
+
+<p>数据并行有一个致命问题：每张 GPU 都存储一模一样的完整模型。这极其浪费——100 张 GPU 存的不是 100 套不同的数据，而是 100 套一模一样的东西。</p>
+
+<p><strong>ZeRO</strong>（Zero Redundancy Optimizer，零冗余优化器）是微软 DeepSpeed 框架的核心创新。它的核心思路是：<strong>既然每张卡存的是同样的东西，为什么不让它们各自只存一部分，需要时互相借？</strong></p>
+
+<p>训练过程中，每张 GPU 的显存里主要存四样东西：</p>
+
+<ul>
+  <li><strong>模型参数</strong>（Model Parameters）：模型本身的权重数字</li>
+  <li><strong>梯度</strong>（Gradients）：告诉优化器"参数该往哪个方向调整"的数值</li>
+  <li><strong>优化器状态</strong>（Optimizer States）：优化器本身需要记录的中间变量（如 Adam 优化器需要存储每个参数的"动量"和"方差"）。注意：优化器状态的显存占用通常是模型参数本身的 <strong>2-4 倍</strong></li>
+  <li><strong>临时激活值</strong>（Activations）：计算过程中产生的中间结果</li>
+</ul>
+
+<p>ZeRO 分三个级别，一级比一级省显存，但也一级比一级通信多：</p>
+
+<h3>ZeRO-1：分片优化器状态</h3>
+
+<p>最基本的"去重"：把优化器状态切成 N 份（N 等于 GPU 数量），每张 GPU 只存 1/N。需要完整的优化器状态时，所有卡通过通信临时拼起来。</p>
+
+<p>举例：8 张 GPU 训练，优化器状态原本每张卡 200 GB。用 ZeRO-1 后，每张卡只存 25 GB。显存节省了 <strong>175 GB × 8 = 1.4 TB</strong>（整个集群层面）。</p>
+
+<div class="callout">
+  <strong>ZeRO-1 节省多少？</strong>如果 Adam 优化器（一种最常用的优化器）存储的状态是模型参数的 2 倍（Adam 需要两个状态），那么 ZeRO-1 可以节省模型大小 × 2 × (1 - 1/N) 的显存。8 张 GPU 时，节省约 <strong>87.5% 的优化器状态显存</strong>。
+</div>
+
+<h3>ZeRO-2：分片优化器状态 + 梯度</h3>
+
+<p>在 ZeRO-1 的基础上，进一步把梯度也切开。每张 GPU 只存 1/N 的梯度。需要聚合梯度时，通信开销增加——但这增加是可控的，因为梯度通信本来就在做 All-Reduce。</p>
+
+<p><strong>关键设计：</strong>ZeRO-2 不改变数据并行的通信量（通信量的总量不变），只是改变了通信模式——从"大家一起传，每人存一份"变成"各传各的，每人只存自己的那份"。总通信量不变，但显存大幅减少。</p>
+
+<h3>ZeRO-3：分片一切——连模型参数都切</h3>
+
+<p>最激进的级别。连模型参数本身也分片存储。每张 GPU 只永久存储 1/N 的模型参数。当某张 GPU 当前需要计算某一层、而该层的参数不在自己显存中时，它<strong>临时从其他 GPU 那里"借"参数</strong>。算完这一层后释放掉（如果该层不属于自己的分片），再借下一层需要的参数。</p>
+
+<p>这就类似于一个团队共用一本书：不是每个人买一本（数据并行的做法），而是把书拆成几章每人存一章。谁要看哪章就去借，看完还回去。</p>
+
+<p>ZeRO-3 的通信开销显著增加——每次计算一层都可能需要从其他 GPU 拉参数。但收益巨大：在 ZeRO-3 出现之前，训练 1750 亿参数的 GPT-3 被认为需要几千张 GPU。有了 ZeRO-3，几百张就够了。</p>
+
+<div class="callout warn">
+  <strong>ZeRO 不是万能的：</strong>虽然 ZeRO-3 让千亿参数模型可以在普通硬件上训练，但它增加了通信量。如果 GPU 之间的网络带宽不够（比如用的是较慢的以太网而不是 InfiniBand），ZeRO-3 的多余通信开销会使训练速度大幅下降。ZeRO 省显存，但前提是网络够快。
+</div>
+
+<h3>ZeRO 三级对比</h3>
+
+<table>
+  <tr><th>级别</th><th>分片内容</th><th>显存节省（8 卡，粗略）</th><th>通信量</th><th>适用场景</th></tr>
+  <tr><td>无 ZeRO（纯 DP）</td><td>不分片</td><td>0%（基准）</td><td>基准</td><td>小模型，单卡放得下</td></tr>
+  <tr><td>ZeRO-1</td><td>优化器状态</td><td>约 4×</td><td>与基准相同</td><td>中等模型，优化器状态是瓶颈</td></tr>
+  <tr><td>ZeRO-2</td><td>优化器状态 + 梯度</td><td>约 8×</td><td>与基准相同</td><td>较大模型，梯度存储也是瓶颈</td></tr>
+  <tr><td>ZeRO-3</td><td>优化器状态 + 梯度 + 模型参数</td><td>约 8×（与单卡显存线性相关）</td><td>增加约 50%</td><td>超大模型，参数本身放不下</td></tr>
+</table>
+
+<p><strong>FSDP</strong>（Fully Sharded Data Parallel，全分片数据并行）：PyTorch 官方对 ZeRO-3 思路的实现。2022 年集成到 PyTorch 中，使得 ZeRO 的思想不依赖 DeepSpeed 也能用。功能和 ZeRO-3 基本等价，优势是 PyTorch 原生支持，不需要额外安装 DeepSpeed。</p>
+
+<h2>技术要点：除了并行，还有这些省显存的技巧</h2>
+
+<h3>混合精度训练（Mixed Precision Training）</h3>
+
+<p>核心思路：<strong>用低精度算，用高精度存。</strong></p>
+
+<ul>
+  <li>计算（前向传播和反向传播）：用 <strong>FP16</strong>（16 位浮点数，每个数字 2 字节）甚至 <strong>BF16</strong>（Brain Floating Point 16，谷歌提出的另一种 16 位格式，范围更大但精度更低）。速度是 32 位的 <strong>2-3 倍</strong>。</li>
+  <li>参数更新（优化器步骤）：用 <strong>FP32</strong>（32 位浮点数，每个数字 4 字节）。保证精度不丢失——小的梯度更新如果存在 FP16 里会直接变成 0（因为 FP16 只能精确表示 3-4 位有效数字，太小的数直接"淹没"）。</li>
+  <li><strong>Loss Scaling</strong>（损失缩放）：一个小技巧。因为梯度值可能非常小（如 0.0000001），在 FP16 中无法表示（变成 0）。所以在计算前把所有值放大若干倍（如 1024 倍），算完后再缩回去——让小的值"浮出水面"被 FP16 捕捉到。</li>
+</ul>
+
+<p>效果：训练速度接近 FP16（快），训练精度接近 FP32（准）。绝大多数大模型训练都默认开启了混合精度。</p>
+
+<h3>梯度检查点（Gradient Checkpointing）</h3>
+
+<p>用计算换显存。正常训练时，为了避免反向传播时重新计算，所有中间结果都会保存在显存里。梯度检查点的做法是：<strong>只保留部分中间结果（检查点），其余的在需要时临时重新算一遍</strong>。</p>
+
+<p>举例：一个 96 层的 Transformer，正常训练需要把每一层计算后的中间结果保存下来——96 份数据。梯度检查点允许只保留每 4 层的结果（24 个检查点）。当反向传播遇到没有保存中间结果的层时，从最近的检查点重新正向计算——"重放"一小段。</p>
+
+<p>代价：计算量增加约 <strong>20%-30%</strong>（重新算的代价）。收益：显存节省约 <strong>50%-70%</strong>。对于显存紧张的大模型训练，这个取舍很划算。</p>
+
+<h3>FlashAttention——不是靠硬件，而是靠算法</h3>
+
+<p><strong>Attention</strong>（注意力机制）是 Transformer 模型的核心计算——它让模型理解一段文字中每个词与其他词的关系。但标准的注意力计算有一个严重问题：显存占用随输入长度呈<strong>平方级增长</strong>。</p>
+
+<p>具体来说，如果输入序列长度是 N（一段文字有 N 个词语），标准注意力需要构建一个 N × N 的矩阵。这个矩阵如果全部放在显存里：</p>
+<ul>
+  <li>N = 2048（一篇文章的长度）：约 16 MB，可以接受。</li>
+  <li>N = 8192：约 256 MB，开始吃力。</li>
+  <li>N = 32768（一本书一章的长度）：约 4 GB，一张 GPU 的显存直接被注意力吃掉了 5%。</li>
+  <li>N = 65536：约 16 GB——<strong>差不多是整张卡显存的 20% 被一个中间矩阵占掉</strong>。</li>
+</ul>
+
+<p><strong>FlashAttention</strong>（由斯坦福大学团队提出）的思路是：不要把整个注意力矩阵都算出来再存。而是利用 GPU 硬件特性，把计算切成小块，一边算一边用，算完就丢——<strong>像流水一样，不需要一次性把所有水都存在缸里</strong>。避免读写整个 N × N 矩阵，只保留最终结果。</p>
+
+<p><strong>技术层面：</strong>FlashAttention 利用了 GPU 的<strong>内存层级</strong>——GPU 显存分为"全局显存"（大但慢，HBM）和"共享内存"（小但快，SRAM）。标准做法是在大显存中算出完整注意力矩阵再读回来，FlashAttention 改成在快内存中逐块计算，只读不写大矩阵。</p>
+
+<p>效果：</p>
+<ul>
+  <li>显存占用从平方级降到<strong>线性级</strong>。</li>
+  <li>速度提升了 <strong>2-4 倍</strong>（因为减少了最慢的操作——读写 HBM 显存）。</li>
+  <li>数学上<strong>完全等价</strong>于标准注意力——不是近似，是更聪明的计算方式。</li>
+  <li>PyTorch 2.0 已内置（torch.nn.functional.scaled_dot_product_attention），默认开启。</li>
+</ul>
+
+<div class="callout">
+  <strong>FlashAttention 的意义不仅在于省显存：</strong>它让模型能处理更长的文本。ChatGPT 的上下文窗口从 4096 涨到 128K，背后就有 FlashAttention 的贡献——如果注意力计算还是平方级显存，128K 输入长度需要 TB 级别的显存，根本无法落地。
+</div>
+
+<h2>框架对比：选哪个？</h2>
+
+<p>市面上主要的分布式训练框架各有侧重。它们不是互斥的——事实上，大模型训练通常"多框架组合"。</p>
+
+<table>
+  <tr><th>框架</th><th>开发者</th><th>核心特点</th><th>何时用</th></tr>
+  <tr>
+    <td><strong>PyTorch</strong></td>
+    <td>Meta</td>
+    <td>灵活、研究友好、社区最大。内置 FSDP（ZeRO-3 等价）、混合精度、FlashAttention</td>
+    <td>研究和大部分训练任务。如果你的模型在 100 亿参数以内，PyTorch 原生够用</td>
+  </tr>
+  <tr>
+    <td><strong>DeepSpeed</strong></td>
+    <td>Microsoft</td>
+    <td>ZeRO 优化（1/2/3 级）、训练效率极高。能在普通硬件上训练原本不可能的大模型</td>
+    <td>大规模分布式训练——百亿到千亿参数。显存不够时先上 DeepSpeed ZeRO-2/3</td>
+  </tr>
+  <tr>
+    <td><strong>Megatron-LM</strong></td>
+    <td>NVIDIA</td>
+    <td>张量并行 + 流水线并行的高效实现。专门为超大模型设计</td>
+    <td>千亿参数以上。GPT-3、LLaMA 这类规模的模型。通常和 DeepSpeed 一起用（Megatron 管并行切分，DeepSpeed 管 ZeRO 优化）</td>
+  </tr>
+  <tr>
+    <td><strong>NeMo</strong></td>
+    <td>NVIDIA</td>
+    <td>预训练模型 + Pipeline 封装。集成 Megatron-LM，降低上手门槛</td>
+    <td>需要快速搭建训练流程而不想从零写并行逻辑。适合企业级训练流水线</td>
+  </tr>
+  <tr>
+    <td><strong>Colossal-AI</strong></td>
+    <td>HPC-AI Tech</td>
+    <td>完整并行策略集合（DP + TP + PP + ZeRO），插件式集成</td>
+    <td>想要国产方案，或者在非 NVIDIA GPU 上做分布式训练</td>
+  </tr>
+</table>
+
+<h3>实际怎么组合？</h3>
+
+<p>一个典型的千亿参数大模型训练的技术栈：</p>
+
+<ul>
+  <li><strong>PyTorch</strong> 做基底——模型定义、数据加载、训练循环。这是写代码的环境。</li>
+  <li><strong>Megatron-LM</strong> 管理并行切分——张量并行和流水线并行。负责"怎么切模型"。</li>
+  <li><strong>DeepSpeed ZeRO-2/3</strong> 管理显存——优化器状态、梯度、模型参数分片。负责"怎么省显存"。</li>
+  <li><strong>FlashAttention</strong> 优化注意力计算——默认开启。负责"怎么让长文本不死机"。</li>
+  <li><strong>混合精度 FP16/BF16</strong> 加速计算——大部分计算用半精度。负责"怎么跑得更快"。</li>
+</ul>
+
+<p>这几者不是"选一个"的关系，而是"一起用"。Megatron-LM + DeepSpeed 的组合是当前训练 GPT-4、LLaMA 等超大模型的事实标准。</p>
+
+<div class="callout warn">
+  <strong>不要过度工程化：</strong>如果你的模型只有 70 亿参数、8 张 H100，PyTorch FSDP + 混合精度就够了。强行上 Megatron-LM 多一层调度开销，反而可能变慢。选工具的原则是"够用就好"，不是"越高端越好"。
+</div>
+
+<h2>一个完整的训练流程（从写代码到出模型）</h2>
+
+<p>以下不是让读者去操作，而是让你理解：一个训练任务的<strong>全貌</strong>是什么样的——每个阶段的输入输出、谁和谁交互。</p>
+
+<ol>
+  <li><strong>写代码：</strong>用 PyTorch 定义模型结构和训练逻辑。或者直接用 Megatron-LM 的现成训练脚本改参数。</li>
+  <li><strong>配置并行策略：</strong>在配置文件或命令行参数中指定 TP=几、PP=几、DP=几。比如：TP=8（一台服务器内 8 卡），PP=4（4 台服务器做流水线），DP=16（16 组这样的服务器做数据并行），总共 8 × 4 × 16 = 512 张 GPU。</li>
+  <li><strong>配置 ZeRO：</strong>在 DeepSpeed 的配置 JSON 中指定 ZeRO 级别（1/2/3）、分片粒度等参数。</li>
+  <li><strong>提交任务：</strong>通过 Slurm 或 Kubernetes（容器调度系统，上两章的内容）提交训练任务。调度器把任务分发到 512 张 GPU 上。</li>
+  <li><strong>初始化：</strong>每张 GPU 根据并行策略加载自己负责的那部分模型参数。如果是从零训练，随机初始化；如果是微调，从已训练好的权重文件（checkpoint）加载。</li>
+  <li><strong>训练循环：</strong>反复执行——读一批数据、前向传播（算出预测结果）、计算损失（跟标注答案比较）、反向传播（算出梯度）、优化器更新参数。每个<strong>训练步</strong>（step）大约 0.5-2 秒。一个千亿参数模型需要几万到几十万步。</li>
+  <li><strong>保存检查点（Checkpoint）：</strong>每隔一定步数（如 1000 步）保存一次模型参数到分布式存储。万一训练中断，可以从最近的检查点继续，不至于前功尽弃。</li>
+  <li><strong>监控：</strong>全程监控 GPU 利用率、显存使用量、训练损失值（loss，衡量模型预测与真实答案的差距，应该是下降趋势）、通信带宽利用率等指标。任何异常（如某张 GPU 挂掉、网络断开）都需要及时发现和恢复。</li>
+  <li><strong>完成：</strong>训练到收敛（损失不再显著下降，模型已学到数据中的规律），得到最终模型权重文件。</li>
+</ol>
+
+<p>这个流程听起来步骤很多，但核心就是一句：<strong>反复让模型看数据、猜答案、看自己差多少、调整自己。</strong>分布式框架做的事，是让这个"反复"的过程在几百张 GPU 上并行、高效地进行。</p>
+
+<div class="summary-box">
+  <h3>阶段 6.3 总结</h3>
+  <p>分布式训练的核心思想是"拆分"——模型太大一张卡放不下，就拆开放到很多张卡上。具体怎么拆，有三种策略：</p>
+  <ul>
+    <li><strong>数据并行（DP）：</strong>每张卡有完整模型，但各吃不同的数据。最简单，但受限于单卡显存。</li>
+    <li><strong>张量并行（TP）：</strong>把模型内部的大矩阵切开，多张 GPU 非常紧密地协作计算同一层。通信极频繁，限同机箱内的 NVLink GPU。</li>
+    <li><strong>流水线并行（PP）：</strong>把模型的层分段，数据像流水线一样从头传到尾。通信少，但有"气泡"问题。</li>
+    <li><strong>3D 并行</strong>是三种策略的组合——DP 扩展规模，TP 在同机箱内，PP 跨机箱。</li>
+  </ul>
+  <p>除了切模型，<strong>ZeRO</strong>（微软 DeepSpeed）提供了另一条路：不是切模型，而是把每张 GPU 上"重复存储"的数据（优化器状态、梯度、模型参数）切开分片。ZeRO-3 可以让千亿参数模型在几百张 GPU 上训练。</p>
+  <p>辅助技术方面：</p>
+  <ul>
+    <li><strong>混合精度：</strong>用 FP16 算，FP32 存——快且准。</li>
+    <li><strong>梯度检查点：</strong>不存中间结果，需要时重算——用计算换显存。</li>
+    <li><strong>FlashAttention：</strong>注意力计算不存完整矩阵，边算边丢——显存降到线性级，速度反而更快。</li>
+  </ul>
+  <p>框架组合的实践路线：<strong>PyTorch</strong>（基底）+ <strong>DeepSpeed</strong>（显存与训练效率）+ <strong>Megatron-LM</strong>（超大模型并行切分）。不是选一个，而是一起用。模型规模决定你需要多复杂的技术栈——70 亿参数用 PyTorch FSDP 就够了；千亿参数才需要 Megatron-LM。</p>
+</div>
+
+<h2>延伸阅读</h2>
+
+<ul>
+  <li><a href="https://www.deepspeed.ai/tutorials/zero/" target="_blank">DeepSpeed ZeRO 官方教程</a> — 微软 DeepSpeed 团队写的 ZeRO 原理与使用方法，从零开始的完整指南。理解 ZeRO 最好的材料。</li>
+  <li><a href="https://arxiv.org/abs/2205.14135" target="_blank">FlashAttention 论文（Dao et al., 2022）</a> — 原始论文。技术性较强，但前两章的动机和核心思路非常清晰。理解为什么"改变计算顺序能省显存"。后续还有 FlashAttention-2（2023）和 FlashAttention-3（2024）论文。</li>
+  <li><strong>"Efficient Large-Scale Language Model Training on GPU Clusters"</strong>（Narayanan et al., 2021）— 来自 DeepMind/Meta 团队的综述。介绍了 Megatron-LM 的 3D 并行方法论，把几种并行的实现细节和工程取舍都讲得很清楚。适合有一定基础后深入。</li>
+</ul>
+
+<p style="margin-top: 32px; font-size: 14px; color: var(--color-muted);">
+  <a href="06-4-inference.html">下一阶段：推理引擎 →</a>
+</p>
+
+</main>
+
+<script src="../js/nav.js"></script>
+</body>
+</html>

@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>集群管理与监控 — 智算中心服务器全栈知识</title>
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+
+<nav class="sidebar">
+  <h2>智算中心服务器<br>全栈知识</h2>
+  <div class="stage-title">阶段 1</div>
+  <a href="01-overview.html">全景图：什么是智算中心</a>
+  <div class="stage-title">阶段 2 · 算力</div>
+  <a href="02-1-gpu-chips.html">GPU 芯片</a>
+  <a href="02-2-memory.html">内存系统</a>
+  <a href="02-3-gpu-servers.html">GPU 服务器整机</a>
+  <div class="stage-title">阶段 3 · 网络</div>
+  <a href="03-network.html">网络互联</a>
+  <div class="stage-title">阶段 4 · 存储</div>
+  <a href="04-storage.html">存储系统</a>
+  <div class="stage-title">阶段 5 · 基础设施</div>
+  <a href="05-cooling-power.html">散热与供电</a>
+  <div class="stage-title">阶段 6 · 软件栈</div>
+  <a href="06-1-drivers.html">驱动与加速层</a>
+  <a href="06-2-containers.html">容器与资源调度</a>
+  <a href="06-3-training.html">分布式训练框架</a>
+  <a href="06-4-inference.html">推理引擎</a>
+  <a href="06-5-monitoring.html" class="active">集群管理与监控</a>
+  <div class="stage-title">总结</div>
+  <a href="07-summary.html">完整参考架构</a>
+</nav>
+
+<main class="main">
+
+<h1>阶段 6.5 · 集群管理与监控</h1>
+
+<p>前面六个阶段，我们从 GPU 芯片一路讲到推理引擎，把智算中心的"硬本领"讲完了。但还有一个至关重要的问题没有回答：<strong>整个集群跑起来之后，你怎么知道它是否健康？</strong></p>
+
+<p>这就是集群监控的任务——它不直接参与计算，但它决定了你能不能在问题发生时第一时间知道、第一时间修复。</p>
+
+<h2>场景：60 天训练的最后一天</h2>
+
+<p>一个 1000 张 GPU 的集群在训练一个大模型。训练已经跑了 30 天，预计还需要 30 天。突然，第 47 号机器的第 3 张 GPU 的显存开始报错了。</p>
+
+<p>这张卡没有完全死掉，它只是偶尔算错一两个比特——这种错误叫<strong>静默数据损坏</strong>（Silent Data Corruption，简称 SDC，数据在没有任何报错的情况下悄悄出错了）。训练框架不知道数据错了，继续往下算。错误的计算结果像病毒一样传播——它影响了这一轮迭代的梯度（模型参数更新的方向和大小），然后这个被污染的梯度被累加到模型参数里。后面几十天的训练都在一个被污染的模型基础上进行。</p>
+
+<p>等训练跑完 60 天，模型质量明显差于预期，但你根本不知道是哪一天、哪张卡出了问题。</p>
+
+<div class="callout warn">
+  <strong>这是真实发生的事：</strong>2023 年，Meta 在训练 Llama 2 时，因为 GPU 间歇性故障导致训练不稳定，不得不反复回滚到检查点（checkpoint，训练中途保存的模型快照）。大模型训练中，GPU 故障不是"会不会发生"的问题，而是"多久发生一次"的问题。1000 张卡跑 60 天，几乎一定会遇到至少一张卡出问题。
+</div>
+
+<p>集群监控的目标就是：<strong>在所有可能出问题的地方装上"传感器"，第一时间发现、第一时间隔离、第一时间修复。</strong></p>
+
+<p>就像 ICU 里的重症监护——心率、血氧、血压，每一项指标都被实时盯着，一有异常就报警。你不需要一直盯着屏幕看，但系统必须一直盯着。</p>
+
+<h2>核心概念</h2>
+
+<h3>监控层次：四层监控体系</h3>
+
+<p>一个智算中心不是只有 GPU 在跑。从芯片到机房，每一层都可能出问题。合理的监控体系必须覆盖四个层次：</p>
+
+<div class="concept-cards">
+  <div class="concept-card">
+    <h4>第一层：硬件层</h4>
+    <p>GPU 温度、功耗、显存使用率、风扇转速、NVLink（GPU 之间的高速直连通道，详见阶段 3）错误数、ECC（纠错码，Error Correction Code——内存/显存自动检测和修复比特错误的机制）错误数。这些是训练任务的"生命体征"。</p>
+  </div>
+  <div class="concept-card">
+    <h4>第二层：系统层</h4>
+    <p>服务器的 CPU 使用率、系统内存占用、本地磁盘健康状态（是否有坏道）、网卡带宽使用率和错误包数量。系统层的问题通常比硬件层更难排查——一张网卡间歇性丢包，训练变慢但不报错。</p>
+  </div>
+  <div class="concept-card">
+    <h4>第三层：应用层</h4>
+    <p>训练任务的吞吐量（每秒处理多少个训练样本）、损失值（loss，衡量模型预测和真实答案差距的指标）的收敛曲线、各 GPU 之间的通信延迟。如果 1000 张卡中有一张在拖后腿，整体训练速度就被拖慢到和它一样。</p>
+  </div>
+  <div class="concept-card">
+    <h4>第四层：环境层</h4>
+    <p>机房的温度（进风口和出风口都要测）、湿度（太干会产生静电，太湿会结露腐蚀电路）、冷却水的温度和流量、电力输入的电压和功率。环境问题通常是"慢性病"——不会一下子导致崩溃，但会持续加速硬件老化。</p>
+  </div>
+</div>
+
+<p><strong>为什么要分四层？</strong>因为不同层的问题由不同的团队负责。GPU 错误由硬件团队排查，网络丢包由网络团队排查，训练收敛异常由算法团队排查。如果监控系统不分层，所有告警混在一起，面对成百上千条告警，没人知道该谁去处理。</p>
+
+<p><strong>一个典型的问题定位链：</strong>训练吞吐量突然下降 30%（应用层发现）→ 查看网络延迟，发现 47 号机器到交换机的链路延迟异常高（系统层定位）→ 查 47 号机器的网卡日志，发现大量 CRC 错误（校验错误，数据包在传输中损坏了）→ 更换网卡光纤线缆（硬件层修复）。没有分层监控，你连从哪里查都不知道。</p>
+
+<h3>Prometheus + Grafana：监控系统的"标配"组合</h3>
+
+<p>在智算中心监控领域，有一个几乎无人不用的搭配：Prometheus 负责"采集和存储"，Grafana 负责"展示和告警"。</p>
+
+<div class="concept-cards">
+  <div class="concept-card">
+    <h4>Prometheus（时序数据库 + 指标采集）</h4>
+    <p>Prometheus 是一个专门存储<strong>时序数据</strong>（time-series data，带时间戳的数值序列，比如"GPU 温度在过去 10 分钟每分钟是多少度"）的数据库。它每隔几秒从集群中所有设备拉取一次指标数据，存到本地。它不存图片、不存日志、不存文件——<strong>只存数字指标</strong>。因为是专用数据库，查询"过去一小时内所有 GPU 的平均温度"这种操作极快。</p>
+  </div>
+  <div class="concept-card">
+    <h4>Grafana（可视化面板 + 告警）</h4>
+    <p>Grafana 是一个仪表盘工具，连接到 Prometheus（和其他数据源），把枯燥的数值变成图表和曲线。它还能定义告警规则——比如"过去 5 分钟内有任何 GPU 温度超过 85 度，就发一条通知到飞书/钉钉/邮件"。运维人员不用盯着屏幕，手机会收到告警。</p>
+  </div>
+</div>
+
+<p><strong>生活类比：</strong>Prometheus 就像医院的"电子病历数据库"——每次测量的体温、心率、血压都被记录在案，随时可以查历史。Grafana 就像 ICU 床头的"监护仪屏幕"——不是原始数据，而是可视化的曲线和数字，异常时自动报警。病历数据库 + 监护仪屏幕，缺一不可。</p>
+
+<div class="callout">
+  <strong>为什么 Prometheus 在行业里成为标准：</strong>Prometheus 不用你在被监控的机器上装复杂的代理程序。它采用"拉取模式"（pull model）——Prometheus 服务器主动去每台机器上"抓取"指标数据，被监控端只需要暴露一个 HTTP 接口。这种方式的好处是：被监控的机器不需要主动向监控服务器汇报，如果一台机器挂了，Prometheus 自然就抓不到它的数据了，立刻就能发现。而"推送模式"（push model，被监控端主动上报）的问题是——机器挂了就不推了，你得靠"没收到数据"来判断故障，判断逻辑更复杂。
+</div>
+
+<h3>NVIDIA DCGM：专盯 GPU 的"专科医生"</h3>
+
+<p>Prometheus 是"全科医生"，什么指标都能采。但 GPU 的健康状态有一堆复杂的、GPU 特有的指标需要采集——这些指标 Prometheus 自己不懂。这时候需要 NVIDIA DCGM（Data Center GPU Manager，数据中心 GPU 管理器）。</p>
+
+<p>DCGM 是 NVIDIA 官方出品的 GPU 监控工具包。它的两个核心功能：</p>
+
+<ul>
+  <li><strong>暴露 GPU 指标给 Prometheus：</strong>DCGM 从 GPU 驱动层面采集详细指标——GPU 利用率、显存带宽使用量、温度、功耗、ECC 错误计数、NVLink 各链路带宽——然后通过一个标准接口交给 Prometheus 采集。</li>
+  <li><strong>GPU 健康诊断：</strong>DCGM 可以运行诊断测试（diagnostic tests）——对 GPU 的计算单元、显存、互联链路做全面检查。训练任务提交之前先跑一轮 DCGM 诊断，确认所有 GPU 健康再开始训练，可以避免"训练跑到一半才发现坏卡"。</li>
+</ul>
+
+<p>DCGM 采集的核心 GPU 指标：</p>
+
+<table>
+  <tr><th>指标名称</th><th>含义</th><th>正常范围</th><th>告警阈值（参考）</th></tr>
+  <tr><td>GPU 利用率（GPU Utilization）</td><td>GPU 计算核心在忙的比例</td><td>训练中 90%-100%</td><td>训练时低于 50% 说明有事卡住了</td></tr>
+  <tr><td>显存占用（FB Used）</td><td>显存使用量 / 总显存</td><td>视模型大小而定</td><td>接近 100% 且持续增长则可能内存泄漏</td></tr>
+  <tr><td>GPU 温度（GPU Temp）</td><td>核心温度</td><td>满负载下 60-80°C</td><td>超过 85°C 为警告，超过 90°C 会降频保护</td></tr>
+  <tr><td>功耗（Power Draw）</td><td>当前功耗 / 额定功耗</td><td>满负载下 80%-100%</td><td>功耗异常低（比如 20%）说明 GPU 没在干活</td></tr>
+  <tr><td>ECC 错误（ECC Errors）</td><td>显存单比特 / 双比特纠错次数</td><td>0（理想状态）</td><td>任何大于 0 的 ECC 错误都值得调查</td></tr>
+  <tr><td>NVLink 错误（NVLink Errors）</td><td>GPU 间互联链路的错误计数</td><td>0</td><td>任何错误都表示链路或线缆可能有问题</td></tr>
+  <tr><td>GPU 降频状态（Throttle Reason）</td><td>GPU 是否因为温度/功耗限制主动降频</td><td>无降频</td><td>出现降频则散热或供电不足</td></tr>
+</table>
+
+<div class="callout warn">
+  <strong>ECC 错误是最常见的 GPU 故障信号：</strong>ECC 错误分为两种——单比特错误（SBE，Single Bit Error，可以被硬件自动纠正）和双比特错误（DBE，Double Bit Error，无法被硬件纠正）。偶尔几个 SBE 不需要恐慌，但如果某一台机器的某张卡持续产生 SBE，这只说明一件事：这张卡在"走向死亡"的路上。最好的策略是：不等它变成 DBE 导致训练崩溃，提前把它隔离出训练任务。
+</div>
+
+<h3>BMC / Redfish：主机死机了也能管的"救命通道"</h3>
+
+<p>前面讲的 Prometheus、DCGM，都依赖于服务器的操作系统正常运行。如果操作系统崩溃了（内核 panic）、机器完全没响应了，你怎么诊断？怎么重启？</p>
+
+<p>答案在每台服务器主板上的一个小芯片里——<strong>BMC</strong>（Baseboard Management Controller，基板管理控制器）。</p>
+
+<p>BMC 本质上是一个微缩版的小计算机，有自己的 CPU、内存、存储和独立网口。只要服务器还插着电源（哪怕你按了关机键），BMC 就在运行。通过 BMC，你可以：</p>
+
+<ul>
+  <li><strong>远程开机、关机、重启</strong> —— 就像你人站在机房里按了物理电源键</li>
+  <li><strong>查看硬件清单</strong> —— 主板型号、CPU 型号、内存条型号和序列号、所有 PCIe 设备的型号，全都能查</li>
+  <li><strong>读取几百个传感器数据</strong> —— 不仅 GPU 的温度，还包括进风口温度、各块主板区域的温度、电源模块的温度</li>
+  <li><strong>远程挂载虚拟光驱</strong> —— 通过网络把 ISO 镜像挂载到远程服务器上，就像你插了一个 U 盘</li>
+  <li><strong>访问串口控制台（Serial Console）</strong> —— 即使操作系统没启动，也能看到 BIOS 启动信息和内核日志</li>
+</ul>
+
+<p><strong>Redfish</strong> 是 BMC 的"现代版 API"。以前访问 BMC 用的是 IPMI（智能平台管理接口）协议——极其古老、基于 UDP 传输、不加密、功能有限。Redfish 是 2015 年后推出替代 IPMI 的标准，基于 REST API（一种通过 HTTP 协议操作的接口风格，用 GET/POST 等标准方法）和 JSON 格式。你用浏览器或 curl 命令就能操作服务器。</p>
+
+<p><strong>生活类比：</strong>BMC 像汽车发动机管理单元（ECU）——发动机关了它还在用电瓶的电跑。你不需要打开发动机舱就能读取故障码。Redfish 把这个"故障码读取器"升级成了手机 App，用标准协议远程诊断。</p>
+
+<div class="callout">
+  <strong>BMC 在企业级服务器上的实际价值：</strong>假设一个数据中心有 10,000 台服务器。运维团队只有 20 个人。如果没有 BMC，一个人一天能物理巡检多少台机器？大概 50 台——从一台走到另一台，插显示器看状态，然后走过去看下一台。巡检完 10,000 台要 200 人天，也就是 20 个人要连续干 10 天。有了 BMC + Redfish，一个人在 10 分钟内就能扫描完 10,000 台机器的硬件状态，定位到那几台有问题的直接派人去修。
+</div>
+
+<h2>技术要点</h2>
+
+<h3>告警规则：什么该报警，什么不必报？</h3>
+
+<p>监控系统最容易犯的错误不是"没发现"，而是"瞎报警"。如果一个监控系统每天发 500 条告警，运维团队必然关掉通知——然后真正重要的告警也被忽略了。这叫<strong>告警疲劳</strong>（Alert Fatigue）。</p>
+
+<p>好的告警规则遵循一个原则：<strong>不是"有什么异常"就报，而是"有什么需要人立刻处理"才报。</strong></p>
+
+<p>AI 集群的典型告警配置：</p>
+
+<table>
+  <tr><th>告警级别</th><th>触发条件</th><th>通知方式</th><th>响应时间要求</th></tr>
+  <tr>
+    <td><strong>严重（Critical）</strong></td>
+    <td>GPU ECC 双比特错误 > 0、GPU 温度超过 95°C（已降频保护但仍过热）、NVLink 链路中断、存储不可用、关键交换机端口掉线</td>
+    <td>电话 + 即时消息 + 邮件</td>
+    <td>5 分钟内响应</td>
+  </tr>
+  <tr>
+    <td><strong>警告（Warning）</strong></td>
+    <td>GPU 温度 85-95°C、ECC 单比特错误持续升高、GPU 利用率在训练期间低于 50%、网络丢包率 > 0.1%、存储写入延迟超过 100 毫秒</td>
+    <td>即时消息 + 邮件</td>
+    <td>30 分钟内响应</td>
+  </tr>
+  <tr>
+    <td><strong>信息（Info）</strong></td>
+    <td>训练任务启动/结束、GPU 固件更新、检查点保存完成、集群资源使用率日常波动</td>
+    <td>仅记录日志，不通知</td>
+    <td>无需响应</td>
+  </tr>
+</table>
+
+<p><strong>告警聚合（Alert Aggregation）：</strong>另一个关键设计。如果一台交换机挂了，它下面的 20 台服务器全部不可达——你会收到 20 条"服务器不可达"告警。但实际上只有一个问题：交换机死机了。告警聚合的作用就是把这些相关告警合并成一条："交换机 X 故障，影响下游 20 台服务器，请处理交换机。"</p>
+
+<h3>日志管理：出事了从哪里查？</h3>
+
+<p>指标（Metrics）告诉你"什么异常了"，日志（Logs）告诉你"为什么会异常"。指标是数字，日志是文本。当告警触发后，运维团队的第一反应是：打开日志系统，查那个时间点前后发生了什么。</p>
+
+<p>智算中心每天产生 TB 级别的日志——内核日志、驱动程序日志、容器日志、训练框架日志、调度器日志。手动 SSH 到每台机器上看日志不现实。需要集中化的日志管理。</p>
+
+<p>两个主流方案：</p>
+
+<div class="concept-cards">
+  <div class="concept-card">
+    <h4>ELK —— 老牌全功能方案</h4>
+    <p>ELK 是三个开源工具的组合：<strong>Elasticsearch</strong>（分布式搜索引擎，负责存储和全文搜索日志）、<strong>Logstash</strong>（日志采集和格式转换管道，从各台机器收集日志后统一处理）、<strong>Kibana</strong>（Web 可视化界面，类似 Grafana 但专注日志查询和分析）。功能全面，但部署和运维重——Elasticsearch 集群本身就需要不少资源。</p>
+  </div>
+  <div class="concept-card">
+    <h4>Loki —— 轻量级新方案</h4>
+    <p>Loki 是 Grafana 实验室（和 Grafana 同一个公司）出品的日志聚合系统。设计思路和 Prometheus 一样：轻量、只索引标签（哪台机器、哪个应用发出的日志）而不索引日志正文。因此存储成本比 ELK 低很多，且和 Grafana 天然集成——在同一个面板里看指标曲线和对应日志。但全文搜索能力不如 Elasticsearch。</p>
+  </div>
+</div>
+
+<p><strong>选型建议：</strong>如果团队已经有 ELK 使用经验且集群规模足够大（几百台以上），继续用 ELK。如果是新搭建、团队规模小、或者已经用了 Grafana 全家桶，Loki 是更低成本的选择。</p>
+
+<h3>故障预测：不等它坏了再修</h3>
+
+<p>传统的监控是"坏了发现"（reactive）。但 AI 集群的规模越来越大（万卡集群已不罕见），如果每次都是等故障发生再去修，训练中断的损失太大了。</p>
+
+<p>故障预测（Predictive Maintenance，预测性维护）的思路是：<strong>用 AI 模型分析历史传感器数据，在故障实际发生之前预测出"哪张卡快不行了"，提前更换。</strong></p>
+
+<p>具体做法：</p>
+
+<ol>
+  <li><strong>收集历史数据：</strong>记录数千张 GPU 从"健康"到"故障"全过程的传感器数据——温度、电压、功耗、ECC 错误率、风扇转速变化趋势。</li>
+  <li><strong>训练预测模型：</strong>用这些历史数据训练一个分类模型（一种根据输入特征判断类别的 AI 模型），输入是"过去 7 天的传感器数据曲线"，输出是"未来 7 天内故障的概率"。</li>
+  <li><strong>提前通知更换：</strong>模型预测"47 号机 3 号卡未来 7 天故障概率 92%"，运维团队收到通知，在训练空闲期主动更换——训练全程不受影响。</li>
+</ol>
+
+<div class="callout">
+  <strong>故障预测实际有用吗？</strong>Google 在 2021 年发表了一篇论文，分享了他们在 TPU（谷歌自研的 AI 加速芯片）集群上的故障预测实践。核心发现：ECC 错误率、GPU 降频频率、温度异常波动是三个最强的故障前兆信号。基于这三个信号训练的模型，能够在故障发生前 6-12 小时发出预警，准确率约 85%。虽然不能做到 100%，但每多提前一小时发现，就少了一次训练中断的风险。
+</div>
+
+<h3>AI 集群常见故障排行榜</h3>
+
+<p>根据业界多个大型智算中心（Meta、Google、NVIDIA 自建集群）公开发表的运维数据，AI 集群的故障分布大致如下：</p>
+
+<table>
+  <tr><th>排名</th><th>故障类型</th><th>占比</th><th>典型表现</th><th>处理方式</th></tr>
+  <tr>
+    <td>1</td>
+    <td>GPU ECC 错误 / 显存故障</td>
+    <td>约 40%</td>
+    <td>训练吞吐量下降、偶发数值错误（gradient 出现 NaN）、loss 不收敛</td>
+    <td>立即隔离该 GPU、回滚到最近的 checkpoint、用健康 GPU 继续训练</td>
+  </tr>
+  <tr>
+    <td>2</td>
+    <td>NVLink / 网络链路中断</td>
+    <td>约 25%</td>
+    <td>多卡通信超时、all-reduce（分布式训练中多卡之间的数据汇总操作）卡住、训练挂起不动</td>
+    <td>检查线缆和光模块、重新激活链路、必要时更换硬件</td>
+  </tr>
+  <tr>
+    <td>3</td>
+    <td>存储 IO 超时 / 性能下降</td>
+    <td>约 15%</td>
+    <td>数据加载延迟导致 GPU 利用率骤降、checkpoint 保存超时</td>
+    <td>检查存储节点状态、排查网络拥塞、调整 striping 策略</td>
+  </tr>
+  <tr>
+    <td>4</td>
+    <td>电源模块 / 供电异常</td>
+    <td>约 10%</td>
+    <td>服务器不定时重启、GPU 功耗无法达到额定值</td>
+    <td>更换电源模块、检查机柜电力分配是否超载</td>
+  </tr>
+  <tr>
+    <td>5</td>
+    <td>散热失效 / 过热</td>
+    <td>约 10%</td>
+    <td>GPU 频繁降频、性能周期性波动（热了就降频、凉快了又恢复）</td>
+    <td>检查冷却水温、清洁散热器、检查风扇是否故障</td>
+  </tr>
+</table>
+
+<p>从这张表能看出一个规律：<strong>GPU 本身的可靠性是所有环节中的最薄弱点。</strong>这个规律对所有规模的 AI 集群都适用。所以 NVIDIA DCGM + 针对 ECC 错误的告警，是任何 AI 集群监控的最低配置。</p>
+
+<h2>工具一览</h2>
+
+<table>
+  <tr><th>工具</th><th>用途</th><th>备注</th></tr>
+  <tr>
+    <td><strong>Prometheus</strong></td>
+    <td>指标（metrics）收集和存储——时序数据库</td>
+    <td>开源标准，几乎所有可监控组件都会暴露 Prometheus 接口。云原生监控的事实标准</td>
+  </tr>
+  <tr>
+    <td><strong>Grafana</strong></td>
+    <td>可视化面板和告警规则管理</td>
+    <td>与 Prometheus 最佳搭档。社区有大量现成的 GPU 集群监控面板模板（dashboard），导入即用</td>
+  </tr>
+  <tr>
+    <td><strong>NVIDIA DCGM</strong></td>
+    <td>GPU 专项监控、指标暴露、健康诊断</td>
+    <td>GPU 集群必备。不装 DCGM 等于没有 GPU 监控——Prometheus 采集不到 GPU 专有指标</td>
+  </tr>
+  <tr>
+    <td><strong>BMC / Redfish</strong></td>
+    <td>带外服务器管理——远程开关机、硬件巡检、传感器读取</td>
+    <td>操作系统崩溃后的最后救命通道。大规模集群管理的效率基石</td>
+  </tr>
+  <tr>
+    <td><strong>ELK Stack</strong></td>
+    <td>日志聚合、搜索、可视化（Elasticsearch + Logstash + Kibana）</td>
+    <td>功能最全面但资源消耗大。适用于 500 台以上规模、有专职运维团队的场景</td>
+  </tr>
+  <tr>
+    <td><strong>Loki</strong></td>
+    <td>轻量级日志聚合（Grafana 实验室出品）</td>
+    <td>与 Grafana 无缝集成，存储成本低。适合中小规模集群或 Prometheus + Grafana 全家桶用户</td>
+  </tr>
+  <tr>
+    <td><strong>NVIDIA Nsight Systems</strong></td>
+    <td>GPU 性能时间线分析和调优</td>
+    <td>不是实时监控工具，而是性能分析工具——用于排查"为什么训练慢"而不是"机器坏了没"</td>
+  </tr>
+</table>
+
+<h2>一张图总结</h2>
+
+<div class="summary-box">
+  <h3>阶段 6.5 总结</h3>
+  <p>集群监控就像 ICU 重症监护——硬件、系统、应用、环境四层指标实时感知，异常第一时间发现、定位、修复。坏的监控可能让一个 60 天的训练任务在最后一天因为一张坏卡前功尽弃。</p>
+  <ul>
+    <li><strong>四层监控体系：</strong>硬件层（GPU 温度/ECC/功耗）、系统层（CPU/内存/网卡/磁盘）、应用层（吞吐量/loss/通信延迟）、环境层（机房温度/湿度/电力）。不同层的告警发给不同团队，避免告警混乱</li>
+    <li><strong>Prometheus + Grafana 是行业标配：</strong>Prometheus 负责采集和存储时序指标，Grafana 负责可视化和告警。两者都是开源产品，社区有大量现成的 GPU 集群监控模板</li>
+    <li><strong>NVIDIA DCGM 专盯 GPU：</strong>GPU 是 AI 集群中最容易出故障的组件（占故障总量约 40%）。DCGM 提供 GPU 专用指标暴露和健康诊断功能，没有它等于没有 GPU 监控</li>
+    <li><strong>BMC / Redfish 是"救命通道"：</strong>操作系统崩溃后，BMC 让你仍然能远程操作服务器。Redfish 用现代 REST API 替代了老旧的 IPMI 协议。大规模集群管理离开它寸步难行</li>
+    <li><strong>告警不在于多，在于精准：</strong>告警疲劳比没监控更危险。好的告警只报"需要人立刻处理"的事件，且通过告警聚合把相关问题合并成一条</li>
+    <li><strong>日志 + 指标 = 完整的可观测性：</strong>指标告诉你"什么出问题了"，日志告诉你"为什么出问题"。ELK 和 Loki 是两大日志管理方案，各有适用场景</li>
+    <li><strong>从"坏了修"到"预测修"：</strong>故障预测模型通过分析 ECC 错误率、降频频率、温度异常波动等信号，能在故障发生前 6-12 小时预警，大幅减少训练中断</li>
+  </ul>
+</div>
+
+<h2>延伸阅读</h2>
+
+<ul>
+  <li><strong>NVIDIA DCGM 官方文档</strong> — <a href="https://docs.nvidia.com/datacenter/dcgm/latest/" target="_blank">Data Center GPU Manager Documentation</a>。了解 DCGM 的完整功能、支持的指标列表和诊断测试类型</li>
+  <li><strong>Prometheus 官方文档</strong> — <a href="https://prometheus.io/docs/introduction/overview/" target="_blank">Prometheus Overview</a>。从头理解 Prometheus 的数据模型（指标类型、标签、PromQL 查询语言），这是搭建 AI 集群监控的基础</li>
+  <li><strong>Google TPU 故障预测论文</strong> — "Predicting GPU Failures in Large-Scale Training" 相关的工业实践经验。了解 ECC 错误率、降频频率等关键信号如何用于故障预测</li>
+</ul>
+
+<p style="margin-top: 32px; font-size: 14px; color: var(--color-muted);">
+  <a href="07-summary.html">下一阶段：完整参考架构 →</a>
+</p>
+
+</main>
+
+<script src="../js/nav.js"></script>
+</body>
+</html>

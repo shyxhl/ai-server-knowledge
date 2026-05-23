@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>推理引擎 — 智算中心服务器全栈知识</title>
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+
+<nav class="sidebar">
+  <h2>智算中心服务器<br>全栈知识</h2>
+  <div class="stage-title">阶段 1</div>
+  <a href="01-overview.html">全景图：什么是智算中心</a>
+  <div class="stage-title">阶段 2 · 算力</div>
+  <a href="02-1-gpu-chips.html">GPU 芯片</a>
+  <a href="02-2-memory.html">内存系统</a>
+  <a href="02-3-gpu-servers.html">GPU 服务器整机</a>
+  <div class="stage-title">阶段 3 · 网络</div>
+  <a href="03-network.html">网络互联</a>
+  <div class="stage-title">阶段 4 · 存储</div>
+  <a href="04-storage.html">存储系统</a>
+  <div class="stage-title">阶段 5 · 基础设施</div>
+  <a href="05-cooling-power.html">散热与供电</a>
+  <div class="stage-title">阶段 6 · 软件栈</div>
+  <a href="06-1-drivers.html">驱动与加速层</a>
+  <a href="06-2-containers.html">容器与资源调度</a>
+  <a href="06-3-training.html">分布式训练框架</a>
+  <a href="06-4-inference.html">推理引擎</a>
+  <a href="06-5-monitoring.html">集群管理与监控</a>
+  <div class="stage-title">总结</div>
+  <a href="07-summary.html">完整参考架构</a>
+</nav>
+
+<main class="main">
+
+<h1>阶段 6.4 · 推理引擎</h1>
+
+<h2>场景：模型训好了，然后呢？</h2>
+
+<p>模型训完以后，真正的产品才开始——用户发来一个问题，模型要在几百毫秒内生成回复。每次这样的一次"回复"被称为一次<strong>推理</strong>（Inference，模型根据输入产生输出的过程）。</p>
+
+<p>训练是"造车"，推理是"开车"。训练需要巨大的计算量但不需要实时响应——没人等着训练结果，跑几十天也无所谓。推理完全不同：用户每打一个字，模型就要实时响应；高峰期可能有上万个用户同时提问，系统一个都不能卡。两者的优化方向<strong>完全不同</strong>。</p>
+
+<p>为什么推理也需要专门的引擎？直接用 PyTorch 跑模型不行吗？</p>
+
+<p>行是行，但慢。PyTorch 是为"灵活性"设计的——研究者可以随便改模型结构、加新算子、做各种实验。但到了生产环境，模型是<strong>固定的</strong>，你不需要灵活性，你需要的是速度。TensorRT-LLM（NVIDIA 的推理优化引擎）可以把推理速度提升 5-10 倍——这意味着同样的硬件可以服务 5-10 倍的用户，或者同样的用户量只需要 1/5 的硬件。这笔账算下来，省下的 GPU 采购成本是千万级的。</p>
+
+<div class="callout warn">
+  <strong>关键认知：</strong>推理不是训练的"附属品"。对绝大多数 AI 公司来说，训练是成本中心（花钱训练模型），推理是利润中心（用户每次调用都产生收入或价值）。推理效率直接决定了商业模式能不能跑通——推理成本降一半，毛利率可能翻倍。
+</div>
+
+<h2>核心概念</h2>
+
+<h3>KV Cache：推理的命脉</h3>
+
+<p><strong>KV Cache</strong>（Key-Value Cache，键值缓存）是理解推理性能的第一把钥匙。要理解它为什么重要，先看大模型是怎么逐字生成文本的。</p>
+
+<p>大模型生成文本是"一个字一个字蹦出来的"——这叫做<strong>自回归生成</strong>（Autoregressive Generation）。具体过程：</p>
+
+<ol>
+  <li>你输入"今天天气"，模型算一次，输出"真"</li>
+  <li>模型把完整的"今天天气真"再算一次，输出"好"</li>
+  <li>模型把"今天天气真好"再算一次，输出下一个字……</li>
+</ol>
+
+<p>每生成一个字，模型都要"重新阅读"之前所有的字。如果每次重新读都要完整重算，那生成第 1000 个字需要重复计算前 999 个字的信息——慢得不像话。</p>
+
+<p>KV Cache 就是用来解决这个问题的：模型在生成每个字的时候，会把中间计算结果（Key 和 Value 矩阵）缓存起来。生成下一个字时，老的 Token（文本的最小单位，可以理解为"字"或"词"的数字化表示）直接从缓存读，只需要为新 Token 计算一次。这样，生成第 1000 个字和第 1 个字的计算量几乎是相同的。</p>
+
+<div class="callout">
+  <strong>生活类比：</strong><br>
+  没有 KV Cache = 每次写一个字就要把整篇文章从头读一遍。<br>
+  有 KV Cache = 手里拿着之前的笔记，写新字时翻一下笔记就行，不需要重读全文。
+</div>
+
+<p>KV Cache 的问题是<strong>吃显存</strong>。一个 70B 参数的大模型（如 Llama 3 70B），处理 4096 个 Token 的上下文，KV Cache 可能占用约 2-4 GB 显存。对话越长，上下文越多，KV Cache 越大。一个长对话可以轻松吃掉所有可用 GPU 显存。这直接引出了推理领域需要解决的核心矛盾：速度、显存、吞吐量（单位时间内能处理多少请求）三者之间的平衡。</p>
+
+<h3>Continuous Batching：让 GPU 永远不闲着</h3>
+
+<p>在推理服务中，用户的请求是随机到达的。传统做法叫做<strong>静态批处理</strong>（Static Batching）：等服务积累一批请求，凑成一个 Batch（一批同时处理的请求），一起喂给 GPU，全部算完后再等下一批。</p>
+
+<p>问题出在"等"上。这一批里的请求长短不一——短请求（比如回答"是"或"否"）早就算完了，但它不能离开，必须等这一批里最长的那个请求也完成，才能一起结束。GPU 在这段时间里是<strong>空转</strong>的。</p>
+
+<p><strong>Continuous Batching</strong>（连续批处理）的做法完全不同：不设边界。一旦某个请求生成完毕，立刻把它踢出 Batch，同时塞一个新请求进来。GPU 的 Batch 大小是<strong>动态变化</strong>的，永远保持满负荷。</p>
+
+<div class="callout">
+  <strong>生活类比：</strong><br>
+  静态批处理 = 餐厅等凑齐一桌子客人再开始做菜，有人先吃完也得等最慢的那个人吃完才能翻台。<br>
+  连续批处理 = 有人吃完就走，立刻安排新客人坐下。座位永远坐满，翻台率最高。
+</div>
+
+<p>这个方法是 <strong>vLLM</strong>（UC Berkeley 开源的推理引擎）的核心创新。相比静态批处理，连续批处理可以把吞吐量提升 2-10 倍。今天几乎所有主流推理引擎——TensorRT-LLM、SGLang、TGI——都实现了类似机制。</p>
+
+<h3>量化：把模型"压缩"</h3>
+
+<p><strong>量化</strong>（Quantization）是指把模型参数从高精度数值格式转换成低精度格式，用极小的精度损失换取巨大的速度和内存收益。</p>
+
+<p>训练大模型时，参数通常用 <strong>FP16</strong>（16 位浮点数，每个数占 2 个字节，能表示小数点后多位数字的数值格式）或 BF16 存储。推理时，可以把这些参数压到 <strong>INT8</strong>（8 位整数）/ <strong>INT4</strong>（4 位整数，每个数只占半个字节）：</p>
+
+<table>
+  <tr><th>精度</th><th>每参数占用</th><th>70B 模型显存需求</th><th>相对速度</th></tr>
+  <tr><td>FP16（原始）</td><td>2 字节</td><td>约 140 GB</td><td>基准 (1x)</td></tr>
+  <tr><td>INT8</td><td>1 字节</td><td>约 70 GB</td><td>约 1.5-2x</td></tr>
+  <tr><td>INT4</td><td>0.5 字节</td><td>约 35 GB</td><td>约 2-4x</td></tr>
+</table>
+
+<div class="callout">
+  <strong>生活类比：</strong><br>
+  把一张 RAW 格式照片（100MB，无损）压缩成 JPEG（5MB，有损但肉眼几乎看不出区别）。量化就是这个逻辑——模型"瘦身"到 1/4 的体积，回答质量几乎不变。
+</div>
+
+<p>主流量化算法：</p>
+
+<div class="concept-cards">
+  <div class="concept-card">
+    <h4>GPTQ</h4>
+    <p>基于校准数据的逐层量化方法。用一批样本数据"观察"每一层的数据分布，按分布情况决定量化策略。需要在校准数据集上跑一次，量化完成后得到新的模型文件，直接加载使用。精度保持好，是生产环境的主流选择。</p>
+  </div>
+  <div class="concept-card">
+    <h4>AWQ（激活感知权重量化）</h4>
+    <p>发现了一个关键现象：模型中只有约 1% 的权重（参数）对结果影响巨大，直接量化这些"重要权重"会严重损失精度。AWQ 的做法是：先找出这些关键权重，在量化前把它们略微放大，量化后再还原——保护它们不受量化误差的伤害。效果通常比 GPTQ 还好。</p>
+  </div>
+</div>
+
+<p>INT4 量化后，一个 70B 参数的大模型从需要 4 张 H100（每张 80GB）变成只需要 2 张，甚至一张 H200（141GB）就能跑。成本直接减半。</p>
+
+<h2>技术要点</h2>
+
+<h3>延迟与吞吐量的权衡</h3>
+
+<p>推理系统有两个互相矛盾的指标：</p>
+
+<ul>
+  <li><strong>延迟</strong>（Latency，从收到请求到第一个字输出的时间+后续每个字的生成间隔）：越低越好，用户体验的关键。人盯着屏幕等回复，超过 200 毫秒就会感觉"卡"。</li>
+  <li><strong>吞吐量</strong>（Throughput，单位时间内处理的总 Token 数）：越高越好，经济指标。吞吐量高意味着同样硬件能服务更多用户，单 Token 成本更低。</li>
+</ul>
+
+<p>两者是矛盾的：Batch 越大，吞吐量越高（GPU 并行处理更多请求），但每个请求的延迟也会增加（排队等计算资源）。反之，Batch 越小，延迟越低但吞吐量也低。</p>
+
+<p>这就是推理引擎的"甜点"问题——要根据业务场景找到平衡点：</p>
+
+<ul>
+  <li><strong>实时对话</strong>（ChatGPT 类产品）：优先延迟，用户不能等。Batch 保持较小，接受较低的吞吐量。</li>
+  <li><strong>离线批量处理</strong>（给大量文档做摘要、数据分类）：优先吞吐量。延迟不重要，没人等着看结果。Batch 拉满。</li>
+  <li><strong>代码补全</strong>（Copilot 类产品）：两个指标都敏感——用户敲代码时延迟不能超过 100ms，但请求量巨大。这是最难的场景。</li>
+</ul>
+
+<h3>推测解码：用小模型"猜"大模型</h3>
+
+<p><strong>推测解码</strong>（Speculative Decoding）是一个巧妙的想法：大模型生成一个字很慢，因为每次都要跑完整个网络。但如果有一个<strong>小模型</strong>（参数量是大模型的 1/10 甚至 1/100）先用极快的速度"猜"出 5-10 个候选字，然后大模型一次性验证这 5-10 个字对不对，接受正确的、扔掉错误的——这就相当于大模型一次推理生成了多个字。</p>
+
+<div class="callout">
+  <strong>生活类比：</strong><br>
+  小模型是"草稿秘书"——快速拟一份草稿给老板。<br>
+  大模型是"老板"——一眼扫过去，对的直接签字，错的划掉。秘书写了 10 句只错了 2 句，老板比亲自写快得多。
+</div>
+
+<p>实际效果：在文本类任务（客服对话、文章续写）上可以获得 2-3 倍加速，且输出质量和大模型单独生成完全一致——因为最终是由大模型把关的。目前 TensorRT-LLM 和 vLLM 都内置了对推测解码的支持。</p>
+
+<h3>推理场景的 GPU 怎么选？</h3>
+
+<p>和训练集群完全不同。训练需要 NVLink、NVSwitch、InfiniBand——推理往往不需要：</p>
+
+<div class="concept-cards">
+  <div class="concept-card">
+    <h4>NVIDIA L40S</h4>
+    <p>48GB 显存，专为推理和视觉场景设计。价格远低于 H100，但 INT4/INT8 推理性能不差。适合中小模型（7B-70B）、批处理场景、图像生成推理。性价比之选。</p>
+  </div>
+  <div class="concept-card">
+    <h4>NVIDIA H100</h4>
+    <p>80GB 显存，训练和推理都能打。FP8 推理性能强劲，支持 Transformer Engine 加速。适合大模型（70B+）、对延迟敏感的实时对话场景。</p>
+  </div>
+  <div class="concept-card">
+    <h4>NVIDIA H200</h4>
+    <p>141GB 显存（HBM3e），带宽 4.8 TB/s。最大的卖点是<strong>超大的 KV Cache 容量</strong>。一个 H200 可以装下 H100 两倍的对话上下文。适合超长上下文推理、单机部署超大模型。</p>
+  </div>
+</div>
+
+<p>关键判断逻辑：</p>
+<ul>
+  <li><strong>显存带宽比算力更关键。</strong>推理的瓶颈通常不是计算速度（FLOPS），而是从显存读取 KV Cache 的速度。HBM3e 的高带宽在推理中是最有价值的规格。</li>
+  <li><strong>推理不需要高端网络。</strong>大部分推理是单 GPU 或少数 GPU 并行，GPU 之间通信极少。用普通以太网甚至不需要 RDMA，InfiniBand 纯属浪费。</li>
+  <li><strong>推理需要更大的显存。</strong>KV Cache 吃显存、Batch 大小吃显存、模型参数吃显存。显存不够就只能缩小 Batch 或量化，直接影响吞吐量和质量。</li>
+</ul>
+
+<h2>主流推理引擎对比</h2>
+
+<table>
+  <tr><th>引擎</th><th>开发者</th><th>核心特点</th><th>适用场景</th></tr>
+  <tr>
+    <td><strong>TensorRT-LLM</strong></td>
+    <td>NVIDIA</td>
+    <td>极致性能，图编译优化，NVIDIA GPU 专属。深度绑定了 H100 的 FP8 Transformer Engine 和 H200 的 HBM3e 大带宽</td>
+    <td>生产环境，追求最大吞吐量和最低延迟。NVIDIA GPU 集群的不二之选</td>
+  </tr>
+  <tr>
+    <td><strong>vLLM</strong></td>
+    <td>UC Berkeley 开源社区</td>
+    <td>连续批处理的开创者。PagedAttention 内存管理（把 KV Cache 分页，像操作系统管理虚拟内存那样管理显存，极大地减少显存碎片）。易用性极高，部署一个模型通常只需要几行代码</td>
+    <td>目前最流行的开源推理方案。适合快速搭建推理服务，社区活跃，迭代极快</td>
+  </tr>
+  <tr>
+    <td><strong>Triton Inference Server</strong></td>
+    <td>NVIDIA</td>
+    <td>不只做 LLM 推理。支持多种后端（TensorRT、PyTorch、ONNX、TensorFlow），可以同时服务语音、图像、文本等多个模型。提供模型版本管理、动态批处理、请求优先级队列等企业级功能</td>
+    <td>企业级推理平台。需要服务多种模型（不只是 LLM）、需要精细化的 SLA 管理的场景</td>
+  </tr>
+  <tr>
+    <td><strong>SGLang</strong></td>
+    <td>Stanford / 开源社区</td>
+    <td>结构化生成（强制输出 JSON、遵循 schema），编程式控制推理流程（如"先让模型思考再输出"的链式调用）。RadixAttention 实现更高效的 KV Cache 复用</td>
+    <td>复杂推理工作流。需要精确控制输出格式（如 API 返回 JSON）、多步推理编排</td>
+  </tr>
+  <tr>
+    <td><strong>Ollama</strong></td>
+    <td>社区开源</td>
+    <td>极简单机部署。一条命令下载模型并启动服务，自动处理量化、显存管理。不需要了解推理引擎的任何细节</td>
+    <td>个人开发测试。在自己电脑上跑 Llama 3、Qwen 等模型。不适合生产环境</td>
+  </tr>
+</table>
+
+<div class="callout">
+  <strong>实际使用中的关系：</strong>TensorRT-LLM 和 vLLM 不是"二选一"的竞争关系，更多是互补。TensorRT-LLM 适合"我已经确定用 NVIDIA GPU 做大规模生产"，追求极致性能和成本优化；vLLM 适合"我需要快速迭代、灵活实验、或者我不是全 NVIDIA 生态"。很多团队两种都用——vLLM 做原型验证，TensorRT-LLM 做生产部署。
+</div>
+
+<h2>品牌视角：推理是 AI 的变现环节</h2>
+
+<p>从商业角度看，训练和推理是完全不同的账：</p>
+
+<ul>
+  <li><strong>训练是成本中心。</strong>花几千万甚至上亿买 GPU 集群，烧几个月电费，把模型训出来——这个过程中没有任何收入，纯支出。训完后 GPU 如果没有推理任务，可以直接关掉省电。</li>
+  <li><strong>推理是利润中心。</strong>用户每次调用 API 都产生收入或产品价值。推理的收入是持续的、累积的——一个模型训一次，可以被调用<strong>几十亿次</strong>。</li>
+</ul>
+
+<p>这个区别直接反映在硬件采购策略上：</p>
+
+<div class="callout warn">
+  <strong>训练集群和推理集群的配置差异：</strong>
+
+  <p style="margin-top: 8px;"><strong>训练集群</strong>需要：高端网络（InfiniBand）、NVLink + NVSwitch（多 GPU 紧密耦合）、大量 GPU 同构互联、高带宽并行文件存储。</p>
+
+  <p style="margin-top: 8px;"><strong>推理集群</strong>需要：大显存（容纳 KV Cache）、高显存带宽（不是高计算能力）、普通网络即可（以太网，不需要 RDMA）、单 GPU 或少数 GPU 即可。GPU 之间不需要高速互联，节点之间也不需要。存储要求也低得多。</p>
+
+  <p style="margin-top: 8px;">这意味着，训练集群的硬件<strong>不适合直接拿来做推理</strong>——花大价钱买了 InfiniBand 和 NVSwitch，推理时完全用不上。正确的做法是配两套集群，或者在同一个集群中划分训练区和推理区，各自用不同的网络和 GPU 配置。</p>
+</div>
+
+<p>从 GPU 选型角度看：中国市场受制裁影响，H100/H200 不容易拿到。但推理场景有更多替代方案：</p>
+<ul>
+  <li><strong>L40S</strong> 不受制裁限制，是推理的理想选择。48GB 显存足够跑 INT4 量化后的 70B 模型。</li>
+  <li><strong>国产 GPU</strong>（华为昇腾 910B、寒武纪 MLU370）在推理场景下差距较小——推理不需要复杂的分布式通信，对软件生态的依赖也比训练低。国产替代在推理领域比训练领域现实得多。</li>
+  <li><strong>甚至消费级 GPU</strong>（如 RTX 4090、RTX 5090）在某些小规模推理场景下也能用——24GB 到 32GB 显存，INT4 量化后跑 7B-13B 模型绰绰有余。成本只有 H100 的 1/10 到 1/20。</li>
+</ul>
+
+<h2>一张图总结</h2>
+
+<div class="summary-box">
+  <h3>推理引擎核心要点</h3>
+  <p>推理是 AI 的"最后一公里"——模型训得再好，推理慢了用户不会用。</p>
+  <ul>
+    <li><strong>KV Cache 是推理的命脉。</strong>通过缓存中间结果，让长文本生成速度不再随长度线性恶化。代价是吃显存——长对话会吃掉大量 GPU 显存。</li>
+    <li><strong>连续批处理是效率倍增器。</strong>动态管理请求队列，GPU 永远保持满载。vLLM 凭这项创新改变了整个推理领域的工程实践。</li>
+    <li><strong>量化让大模型能在手机上跑。</strong>INT4 量化可将模型体积压缩到 1/4，精度损失不到 1%。FP16 是"原图"，INT4 是高质量 JPEG。</li>
+    <li><strong>TensorRT-LLM 追求极致性能，vLLM 追求开源易用。</strong>两者经常互补——vLLM 做原型，TensorRT-LLM 做生产。</li>
+    <li><strong>训练是成本中心，推理是利润中心。</strong>训练集群和推理集群的硬件配置完全不同——推理不需要 InfiniBand，不需要 NVSwitch，但需要更大的显存。</li>
+  </ul>
+</div>
+
+<h2>延伸阅读</h2>
+
+<ul>
+  <li><strong><a href="https://arxiv.org/abs/2309.06180" target="_blank">Efficient Memory Management for Large Language Model Serving with PagedAttention</a></strong> — vLLM 团队论文，首次提出 PagedAttention 机制。讲清楚了 KV Cache 管理为什么是推理瓶颈，以及怎么用类似操作系统虚拟内存的方式解决。</li>
+  <li><strong><a href="https://developer.nvidia.com/tensorrt-llm" target="_blank">TensorRT-LLM 官方文档</a></strong> — NVIDIA 的推理引擎完整指南。涵盖了图编译优化、In-flight Batching、推测解码等高级特性。技术深度足够，但需要一定基础。</li>
+  <li><strong><a href="https://arxiv.org/abs/2306.08500" target="_blank">AWQ: Activation-aware Weight Quantization for On-Device LLM Compression and Acceleration</a></strong> — 当前最主流的量化方法之一的技术论文。讲清楚了为什么保护 1% 的关键参数比均匀量化效果好得多。</li>
+</ul>
+
+<p style="margin-top: 32px; font-size: 14px; color: var(--color-muted);">
+  <a href="06-5-monitoring.html">下一阶段：集群管理与监控 →</a>
+</p>
+
+</main>
+
+<script src="../js/nav.js"></script>
+</body>
+</html>

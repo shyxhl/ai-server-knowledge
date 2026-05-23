@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GPU 芯片 — 智算中心服务器全栈知识</title>
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+
+<nav class="sidebar">
+  <h2>智算中心服务器<br>全栈知识</h2>
+  <div class="stage-title">阶段 1</div>
+  <a href="01-overview.html">全景图：什么是智算中心</a>
+  <div class="stage-title">阶段 2 · 算力</div>
+  <a href="02-1-gpu-chips.html">GPU 芯片</a>
+  <a href="02-2-memory.html">内存系统</a>
+  <a href="02-3-gpu-servers.html">GPU 服务器整机</a>
+  <div class="stage-title">阶段 3 · 网络</div>
+  <a href="03-network.html">网络互联</a>
+  <div class="stage-title">阶段 4 · 存储</div>
+  <a href="04-storage.html">存储系统</a>
+  <div class="stage-title">阶段 5 · 基础设施</div>
+  <a href="05-cooling-power.html">散热与供电</a>
+  <div class="stage-title">阶段 6 · 软件栈</div>
+  <a href="06-1-drivers.html">驱动与加速层</a>
+  <a href="06-2-containers.html">容器与资源调度</a>
+  <a href="06-3-training.html">分布式训练框架</a>
+  <a href="06-4-inference.html">推理引擎</a>
+  <a href="06-5-monitoring.html">集群管理与监控</a>
+  <div class="stage-title">总结</div>
+  <a href="07-summary.html">完整参考架构</a>
+</nav>
+
+<main class="main">
+
+<h1>第 2.1 节：GPU 芯片</h1>
+
+<div class="callout">
+  <strong>本节目标</strong><br>
+  理解 GPU 和 CPU 的本质区别，搞清楚为什么大模型训练非 GPU 不可。读完你能看懂 GPU 规格表上的关键参数（算力、显存、带宽），并对市场上几家主要厂商的产品有一个清晰定位。
+</div>
+
+<h2>场景导入</h2>
+
+<p>上一节我们确立了核心结论：智算中心的心脏是 GPU（图形处理器 / Graphics Processing Unit）。那 GPU 到底是什么？它和我们电脑里的 CPU（中央处理器 / Central Processing Unit）有什么区别？为什么训练 GPT 这样的大模型，没有 GPU 就寸步难行？</p>
+
+<p>先给一个直观的比喻：</p>
+
+<p><strong>CPU 是几个数学博士，GPU 是几千个小学生。</strong></p>
+
+<p>一个数学博士可以独立解决微积分、逻辑推理、分支判断——这是你的电脑跑操作系统、开浏览器、做文字处理时需要的"聪明"。</p>
+
+<p>几千个小学生不会微积分，但他们每人都会做一位数加减法。如果你让一万个小学生同时做一道个位数加法，一秒就能做完一万道题——这正是训练大模型需要的能力。</p>
+
+<p>大模型的底层计算，本质上就是海量的、重复的、简单的乘法和加法——专业说法叫"矩阵乘法"和"向量加法"——不需要"聪明"，需要的是"多"。</p>
+
+<h2>核心概念</h2>
+
+<h3>1. 并行计算（Parallel Computing）</h3>
+
+<p>先理解一个计算机世界的基本矛盾：CPU 的强项是<strong>串行</strong>——一件事接着一件事快速做，每件事可以很复杂；GPU 的强项是<strong>并行</strong>——把一件大事拆成无数件小事，同时做。</p>
+
+<p>举个例子：你家店铺要计算 10000 张发票的总金额。</p>
+
+<ul>
+  <li><strong>CPU 的做法</strong>：雇一个会计师，一张一张算，每张算得飞快，但 10000 张还是要等很久。</li>
+  <li><strong>GPU 的做法</strong>：雇 10000 个临时工，每人算一张，一秒钟出结果。</li>
+</ul>
+
+<p>这就是并行计算的核心思想。GPU 内部有数千个小型计算单元（CUDA Core，中文常叫"流处理器"），每个单元的能力都很有限，但胜在数量巨大。</p>
+
+<p>为什么大模型训练特别适合并行？因为训练过程本质上是对<strong>矩阵</strong>做加法和乘法。矩阵的每一个元素的计算互不影响，天然可以并行——这就是"数据并行"的概念。</p>
+
+<div class="callout">
+  <strong>关键数字</strong><br>
+  一颗 NVIDIA H100 GPU 有 <strong>16,896 个 CUDA Core</strong>（流处理器），而一颗高端 CPU（如 Intel Xeon）通常只有 <strong>64 到 128 个核心</strong>。数量级相差 100 到 300 倍。
+</div>
+
+<h3>2. Tensor Core（张量核心）</h3>
+
+<p>如果 GPU 是几千个小学生，那 Tensor Core 就是每个小学生手里的<strong>计算器</strong>——专门用来做一种特定运算：<strong>矩阵乘法（Matrix Multiplication）</strong>。</p>
+
+<p>矩阵乘法在 AI 中有多重要？简单说：你向大模型提问，模型给出的每个回答，背后都是几亿甚至几百亿次矩阵乘法。</p>
+
+<p>NVIDIA 从 2017 年的 Volta 架构开始，在 GPU 内部专门嵌入了一种硬件单元叫 Tensor Core（张量核心，张量可以理解为"多维数组"或"高维矩阵"）。传统的 CUDA Core 要做很多步才能完成一次矩阵乘法，Tensor Core 一个时钟周期（芯片内部的最小时间单位）就能完成。</p>
+
+<p>打个比方：</p>
+<ul>
+  <li>一个 CUDA Core 像一台通用计算器——加减乘除都能做，但每次只能算一个数。</li>
+  <li>一个 Tensor Core 像一台矩阵计算器——按一个键就能同时算出 4x4 矩阵的乘积（16 个乘法和 12 个加法），一步到位。</li>
+</ul>
+
+<p>这不是编程技巧，是<strong>物理上的硬件差异</strong>。芯片上专门划了一块区域给 Tensor Core，面积很宝贵。NVIDIA 敢这么做的原因也很直接：AI 需求爆发后，GPU 的主要客户买来就是做 AI 的，游戏玩家已经不是主力了。与其留着通用计算能力吃灰，不如把芯片面积砸在矩阵运算上。</p>
+
+<p>这也是为什么同样功率下，用 GPU 做 AI 训练比用 CPU 快几十到几百倍——不光是因为核心多，还因为每个核心的<strong>计算效率</strong>远比 CPU 高。</p>
+
+<h3>3. TFLOPS：衡量 GPU 算力的标准</h3>
+
+<p>TFLOPS 的全称是 Trillions (Tera) Floating-point Operations Per Second——<strong>每秒万亿次浮点运算</strong>。"浮点"指的是小数，因为 AI 计算中大量的参数（权重）是小数。</p>
+
+<p>这里最关键的一个认知：<strong>不同精度的 TFLOPS 不能直接比较</strong>。</p>
+
+<p>精度（Precision）决定了计算时保留多少位小数：</p>
+<ul>
+  <li><strong>FP64（双精度浮点 / 64 位）</strong>：最高精度，用于科学模拟和气象计算。保留约 15 位有效数字。</li>
+  <li><strong>FP32（单精度浮点 / 32 位）</strong>：常规精度，传统图形渲染和部分 AI 任务使用。</li>
+  <li><strong>FP16（半精度浮点 / 16 位）</strong>：<strong>AI 训练的事实标准精度</strong>。用一半的位数换来快一倍的吞吐，精度损失在百万级参数下几乎为零。</li>
+  <li><strong>BF16（Brain Float 16 / 脑浮点）</strong>：Google 提出的一种 16 位格式，范围和 FP32 一样大，精度偏低，但神经网络对精度不敏感对范围敏感。</li>
+  <li><strong>FP8 / INT8 / INT4（8 位 / 4 位）</strong>：推理（Inference）时常用的更低精度，以极小精度代价换更大速度提升。</li>
+</ul>
+
+<p>所以看规格表时，一定要先问："你说的 TFLOPS 是 FP16 还是 INT8 的？"同一颗芯，FP16 可能是 1000 TFLOPS，INT8 可能达到 2000 TFLOPS。厂商总是挑最大的数字宣传。</p>
+
+<div class="callout warn">
+  <strong>防坑指南</strong><br>
+  销售或采购中，有人会用"这颗卡 4000 TFLOPS"来证明比"1979 TFLOPS 的 H100"强。但如果不指明精度，这个数字没有意义。统一的比较基准通常是 <strong>FP16 算力</strong>，因为这是大模型训练最常用的精度。
+</div>
+
+<p>算力数字的具体意义是什么？以 NVIDIA H100 的 1979 TFLOPS（FP16）为例：</p>
+<ul>
+  <li>一秒钟可以做 1979 万亿次 16 位小数的加法和乘法。</li>
+  <li>打个比方：中国有 14 亿人，每人每秒做 1400 次乘法，加起来差不多 1979 万亿次。</li>
+  <li>一张 H100 卡，约等于 1979 个万亿次/秒。新一代 Blackwell B200 是 4500 TFLOPS，不到两年翻了一倍多。</li>
+</ul>
+
+<h3>4. CUDA：NVIDIA 的真正护城河</h3>
+
+<p>如果说 GPU 是发动机，那 CUDA 就是能让任何人——不需要懂发动机构造——来开这辆车的方向盘和油门。</p>
+
+<p><strong>CUDA（Compute Unified Device Architecture / 统一计算设备架构）</strong> 是 NVIDIA 在 2006 年推出的一套编程模型和软件工具。在此之前，GPU 只能做图形渲染，要让 GPU 做通用计算需要把计算任务伪装成图形任务，极其痛苦。CUDA 出来后，程序员可以用类似 C 语言的语法直接编写跑在 GPU 上的代码。</p>
+
+<p>CUDA 的重要性怎么强调都不过分：</p>
+<ul>
+  <li><strong>没有 CUDA，就没有深度学习的爆发</strong>。2012 年，AlexNet（一个图像识别模型）用 CUDA 在 GPU 上训练，速度比当时最好的 CPU 快了几十倍。从此整个 AI 学术界转向 GPU。</li>
+  <li><strong>生态锁定是极深的</strong>。Linux 上的几乎所有 AI 框架（PyTorch、TensorFlow、JAX）底层都是通过 CUDA 来驱动 GPU。全球数百万 AI 开发者用 CUDA 写了 15 年的代码、库和教程。</li>
+  <li><strong>换成竞品不是加个适配层就完事</strong>。竞争对手（AMD、Intel）可以通过硬件性能追上来，但十几年的软件生态积累很难追。这就像 iOS 的 App Store 生态——安卓手机性能再强，如果你的 App 和用户全在 iOS 上，你也不会轻易换。</li>
+</ul>
+
+<p>所以为什么 NVIDIA 的市占率能维持在 90% 左右？不是因为硬件没人做得过它（AMD MI300X 纸面参数已经逼近甚至超过 H100），而是因为软件生态——CUDA 是一个累积了 18 年的"操作系统级护城河"。</p>
+
+<div class="callout">
+  <strong>一句话总结</strong><br>
+  NVIDIA 不只是一家芯片公司，它是一家 <strong>"芯片 + 软件平台"</strong>公司。芯片提供算力，CUDA 提供能让人用上这个算力的工具。没有 CUDA，H100 就是一块昂贵的硅片。
+</div>
+
+<h2>技术要点</h2>
+
+<h3>GPU 架构演进路线</h3>
+
+<p>NVIDIA 每两年左右推出一代新架构（架构指芯片的底层设计蓝图，不同的架构意味着对计算单元的排布、缓存大小、互联方式做了重新设计）。每一代都会在制程（芯片上晶体管的精细度，纳米越小越先进）、显存带宽和互联技术上同时推进：</p>
+
+<table>
+  <tr>
+    <th>架构</th>
+    <th>发布年份</th>
+    <th>代表产品</th>
+    <th>标志性技术</th>
+    <th>关键意义</th>
+  </tr>
+  <tr>
+    <td><strong>Volta</strong></td>
+    <td>2017</td>
+    <td>V100</td>
+    <td>第一代 Tensor Core，NVLink 2.0</td>
+    <td>将 GPU 从"图形卡"变成"AI 加速卡"。Tensor Core 首次把矩阵乘法硬件化</td>
+  </tr>
+  <tr>
+    <td><strong>Ampere</strong></td>
+    <td>2020</td>
+    <td>A100</td>
+    <td>第三代 Tensor Core，MIG（多实例 GPU / 将一个物理 GPU 虚拟拆成多个小 GPU 的技术），结构化稀疏</td>
+    <td>真正为数据中心设计。MIG 让一张卡可以同时服务多个用户，云计算场景的关键能力</td>
+  </tr>
+  <tr>
+    <td><strong>Hopper</strong></td>
+    <td>2022</td>
+    <td>H100 / H200 / H800</td>
+    <td>Transformer Engine，FP8 原生支持，NVLink 4.0，HBM3</td>
+    <td>专为 Transformer 架构（大模型的基础架构）优化。算力相比 A100 提升 3-6 倍</td>
+  </tr>
+  <tr>
+    <td><strong>Blackwell</strong></td>
+    <td>2024</td>
+    <td>B200 / GB200</td>
+    <td>双芯片合封，FP4 支持，NVLink 5.0（1.8 TB/s），液冷优先设计</td>
+    <td>算力再翻倍到 4500 TFLOPS。双芯片设计让互联带宽暴增。单芯片 1000W 功耗迫使散热走液冷路线</td>
+  </tr>
+</table>
+
+<h3>三代关键技术升级解读</h3>
+
+<p><strong>制程工艺（从纳米到纳米）：</strong>制程指的是芯片上晶体管之间导线的宽度。7nm、5nm、4nm、3nm——数字越小，同样面积能塞进更多晶体管，性能更高、功耗更低。V100 是 12nm，A100 跳到 7nm，H100 到了 4nm——同样一张卡，晶体管数量从 210 亿（V100）涨到 800 亿（H100）。摩尔定律在 GPU 上远没有死。</p>
+
+<p><strong>显存带宽（Memory Bandwidth）：</strong>光算得快不够，还得喂得饱。带宽就是"每秒能从显存里读多少数据送到计算单元"。V100 的带宽是 900 GB/s，H100 到了 3.35 TB/s——快了近 4 倍。带宽跟不上，算力再大也没用（计算单元会"饿着"）。这就像你有一台跑车引擎（高算力），但进油管只有吸管那么粗（低带宽），引擎根本发挥不出来。</p>
+
+<p><strong>NVLink 互联（GPU-to-GPU Interconnect）：</strong>大模型往往一张卡放不下，需要多张卡一起工作。NVLink 是 NVIDIA 自己造的一种"GPU 之间高速对话通道"，类似两根网线直连但快了上百倍。每代 NVLink 带宽都在翻倍——NVLink 4.0 的卡间带宽是 900 GB/s，比我们电脑里的 PCIe 5.0（约 64 GB/s）快了十几倍。多卡协同训练时，NVLink 带宽直接决定了"一万张卡能发挥出几张卡的实力"——带宽不够，卡多也白搭。</p>
+
+<h3>训练 vs 推理：对 GPU 的不同需求</h3>
+
+<p>同样是 GPU，用来做训练（Training）和用来做推理（Inference），侧重点完全不同。理解这个区别对采购决策很重要：</p>
+
+<table>
+  <tr>
+    <th>维度</th>
+    <th>训练（Training）</th>
+    <th>推理（Inference）</th>
+  </tr>
+  <tr>
+    <td><strong>核心需求</strong></td>
+    <td>算力（TFLOPS）第一，显存第二</td>
+    <td>显存和带宽第一，算力够用就行</td>
+  </tr>
+  <tr>
+    <td><strong>精度要求</strong></td>
+    <td>FP16 / BF16（16 位精度），保持训练收敛</td>
+    <td>FP8 / INT8（8 位）甚至 INT4（4 位），越低越好</td>
+  </tr>
+  <tr>
+    <td><strong>互联需求</strong></td>
+    <td>极高——几千张卡同时训练，卡间通信是瓶颈</td>
+    <td>较低——推理任务可以独立分片，不需要大量卡间通信</td>
+  </tr>
+  <tr>
+    <td><strong>典型场景</strong></td>
+    <td>从头训练 GPT、Llama 等大模型</td>
+    <td>部署模型供用户使用（ChatGPT 回答你的问题）</td>
+  </tr>
+  <tr>
+    <td><strong>工作模式</strong></td>
+    <td>持续高强度运行数周甚至数月</td>
+    <td>间断性请求处理，有波峰波谷</td>
+  </tr>
+</table>
+
+<p>一个有用的经验法则：<strong>训练卡是买性能上限，推理卡是买性价比和显存容量。</strong>很多做推理部署的公司会选择 NVIDIA L40S 或消费级的 RTX 4090——训练不行，但推理够用且便宜得多。但训练大模型，A100/H100 几乎是唯一选择。</p>
+
+<div class="callout warn">
+  <strong>注意"阉割版"问题</strong><br>
+  由于美国出口管制，NVIDIA 对中国市场供应的 H800 相比 H100 被削减了 NVLink 互联带宽（从 900 GB/s 降到 450 GB/s）。这直接影响了多卡训练的扩展效率——卡数超过一定规模后，互联带宽成为瓶颈，"加卡不加力"。这是客户采购时必须问清楚的关键点。
+</div>
+
+<h2>品牌对比</h2>
+
+<p>虽然 GPU 芯片市场被 NVIDIA 主导，但竞争正在升温。以下逐一分析四家主要厂商的旗舰产品和定位。</p>
+
+<h3>核心规格对比表</h3>
+
+<table>
+  <tr>
+    <th>厂商</th>
+    <th>旗舰产品</th>
+    <th>架构</th>
+    <th>制程</th>
+    <th>显存</th>
+    <th>显存带宽</th>
+    <th>FP16 算力</th>
+    <th>TDP（功耗）</th>
+    <th>定位</th>
+  </tr>
+  <tr>
+    <td><strong>NVIDIA</strong></td>
+    <td>H100</td>
+    <td>Hopper</td>
+    <td>4nm</td>
+    <td>80GB HBM3</td>
+    <td>3.35 TB/s</td>
+    <td>1979 TFLOPS</td>
+    <td>700W</td>
+    <td>当前绝对主力</td>
+  </tr>
+  <tr>
+    <td><strong>NVIDIA</strong></td>
+    <td>H200</td>
+    <td>Hopper</td>
+    <td>4nm</td>
+    <td>141GB HBM3e</td>
+    <td>4.8 TB/s</td>
+    <td>1979 TFLOPS</td>
+    <td>700W</td>
+    <td>H100 显存升级版</td>
+  </tr>
+  <tr>
+    <td><strong>NVIDIA</strong></td>
+    <td>B200</td>
+    <td>Blackwell</td>
+    <td>4nm</td>
+    <td>192GB HBM3e</td>
+    <td>8 TB/s</td>
+    <td>4500 TFLOPS</td>
+    <td>1000W</td>
+    <td>2024 最新旗舰</td>
+  </tr>
+  <tr>
+    <td><strong>AMD</strong></td>
+    <td>MI300X</td>
+    <td>CDNA 3</td>
+    <td>5nm+6nm</td>
+    <td>192GB HBM3</td>
+    <td>5.3 TB/s</td>
+    <td>2614 TFLOPS</td>
+    <td>750W</td>
+    <td>性价比挑战者</td>
+  </tr>
+  <tr>
+    <td><strong>华为</strong></td>
+    <td>昇腾 910B</td>
+    <td>达芬奇</td>
+    <td>7nm</td>
+    <td>64GB HBM2e</td>
+    <td>1.6 TB/s</td>
+    <td>~320 TFLOPS</td>
+    <td>~310W</td>
+    <td>国产替代主力</td>
+  </tr>
+  <tr>
+    <td><strong>Intel</strong></td>
+    <td>Gaudi 3</td>
+    <td>Gaudi</td>
+    <td>5nm</td>
+    <td>128GB HBM2e</td>
+    <td>3.7 TB/s</td>
+    <td>1835 TFLOPS</td>
+    <td>900W</td>
+    <td>差异化架构</td>
+  </tr>
+</table>
+
+<h3>NVIDIA：统治者的全栈布局</h3>
+
+<p><strong>市占率约 90%。</strong>从 2006 年发布 CUDA 开始，NVIDIA 的战略就不是"做最快的 GPU"，而是"让所有人用 GPU 做计算时只能用我的东西"。</p>
+
+<p>NVIDIA 的全栈策略非常清晰：</p>
+<ul>
+  <li><strong>芯片层</strong>：GPU（H100/B200）— 算力产出端。</li>
+  <li><strong>网卡层</strong>：ConnectX（SmartNIC 智能网卡 / 带独立处理器的网络接口卡）— 处理 GPU 之间的数据传输。</li>
+  <li><strong>交换机层</strong>：Spectrum / Quantum（以太网和 InfiniBand 交换机）— 连接整个数据中心。</li>
+  <li><strong>线缆层</strong>：NVLink Switch + 铜缆/光缆 — 物理连接。</li>
+  <li><strong>软件层</strong>：CUDA + cuDNN（深度学习库）+ NCCL（多卡通信库）+ TensorRT（推理优化引擎）— 从底层驱动到上层应用一把抓。</li>
+</ul>
+
+<p>这意味着买 NVIDIA 不是只买张卡，是买一整套方案。对客户来说省事（不用自己整合不同厂商的产品），但也被深度锁定——未来想换 AMD 或华为，不只是换卡，整个软件栈和网络基础设施都可能要重建。</p>
+
+<p><strong>H100 vs H200 vs B200：</strong>三者的算力代际关系很有意思。H200 和 H100 用的是同一代 Hopper 架构和相同算力，但 H200 把显存从 80GB 换成了 141GB 的 HBM3e（一款更快、容量更大的存储颗粒），带宽从 3.35 TB/s 升到了 4.8 TB/s。这不是为了训练更快，而是为了可以放下更大的模型——想训练万亿参数级别的模型，80GB 根本塞不下。B200 则是全新 Blackwell 架构，算力、显存、带宽全面翻倍，代价是功耗到了 1000W（单卡功耗超过一台微波炉），必须走液冷（液体散热）路线。</p>
+
+<h3>AMD：最接近的追赶者</h3>
+
+<p>AMD MI300X 的规格纸面上非常能打：192GB HBM3 显存（超过 H100 的两倍多），2614 TFLOPS FP16 算力（超过 H100），5.3 TB/s 带宽。单价也通常比同档 NVIDIA 卡低。</p>
+
+<p>但问题出在软件生态。AMD 的编程平台叫 <strong>ROCm</strong>（Radeon Open Compute，类似 CUDA 的开源替代品），从 2016 年开始投入，到 2024 年才勉强达到"能用"的水平。PyTorch 的 ROCm 支持在过去两年有大幅改善（微软和 Meta 在推动），但离 CUDA 的成熟度还有很大距离。</p>
+
+<p>实际部署中的典型问题：CUDA 上跑通了一个训练脚本，换到 ROCm 上可能要花几天甚至几周调试。企业客户的工程师团队大多是在 CUDA 生态里成长起来的，切换成本不低。</p>
+
+<p><strong>AMD 的机会在哪？</strong>推理场景。推理任务对软件的依赖比训练低（模型已经训练好了，推理过程相对标准化），显存容量和带宽更重要。MI300X 的 192GB 大显存在推理上很有优势——可以一次加载更大的模型或容纳更长的上下文（用户输入的一段文字加上历史对话）。Meta 和微软已经开始大规模采购 MI300X 用于推理工作负载。</p>
+
+<h3>华为昇腾（Ascend）：制裁下的追赶</h3>
+
+<p>华为昇腾系列是中国国产 AI 芯片的主力。最新一代 910B 采用华为自研的<strong>达芬奇架构</strong>（Da Vinci Architecture），和 NVIDIA 的 CUDA 生态完全不同。</p>
+
+<p>现实挑战非常具体：</p>
+<ul>
+  <li><strong>制程受限</strong>：美国制裁让华为无法使用台积电 4nm/5nm 工艺，只能用中芯国际的 7nm。制程落后两代直接影响了能效比（每瓦能跑出的算力）。</li>
+  <li><strong>显存受限</strong>：64GB HBM2e 对比 H100 的 80GB HBM3，容量和带宽都吃亏。这意味着同样的模型要么切得更碎去适配多卡，要么根本跑不了。</li>
+  <li><strong>软件生态差距</strong>：华为的软件栈叫 <strong>CANN</strong>（异构计算架构 / Compute Architecture for Neural Networks），配合 <strong>MindSpore</strong>（华为自研深度学习框架）。虽然支持 PyTorch 的适配（通过插件转译），但性能和兼容性仍有差距。</li>
+</ul>
+
+<p>但华为有两点独特优势：</p>
+<ol>
+  <li><strong>政策支持</strong>：政府和国企采购明确向国产芯片倾斜。在中国建设智算中心，用昇腾可以拿到补贴和政策优待。</li>
+  <li><strong>系统整合能力强</strong>：华为不只是做芯片——它做服务器（昇腾服务器）、做网络（自研交换机）、做存储（OceanStor），类似 NVIDIA 的全栈模式。昇腾在大集群部署和系统调优上有自己的经验积累。</li>
+</ol>
+
+<p>华为预计在 2025-2026 年推出昇腾 910C，据传使用先进封装技术组合两颗芯片来弥补单颗制程落后的劣势。具体参数尚未公布。</p>
+
+<h3>Intel Gaudi：第三条道路</h3>
+
+<p>Intel 的 Gaudi 系列（收购以色列公司 Habana Labs 得来）走了一条和所有人都不同的架构路线。</p>
+
+<p>传统 GPU 用硬件逻辑来调度任务（片上有大量的控制单元来决定"先算什么后算什么"），Gaudi 把这个工作交给了软件（编译器 / 将代码翻译为芯片指令的工具）。好处是芯片设计更简单，坏处是对软件编译的依赖极高——写得好就快，写得差就浪费硬件。</p>
+
+<p>Gaudi 3 的招牌特性是<strong>集成了 24 个 200G 以太网接口</strong>直接做在芯片上，不需要单独买网卡。这对做分布式训练的用户来说省了一大笔网络基础设施的钱（每个 GPU 都内置高速网络，天然可扩展）。</p>
+
+<p>但从市场表现看，Gaudi 的实际部署量远小于 NVIDIA 和 AMD。Intel 正在推动 Gaudi 作为"TCO（总拥有成本）更低的替代方案"，核心打法是以价换量。</p>
+
+<div class="callout">
+  <strong>一个判断框架：怎么给不同场景选 GPU？</strong><br><br>
+  <strong>训练大模型（预算充足）</strong>：H100 或 B200 — 稳定、生态好，风险低。<br>
+  <strong>训练大模型（预算有限）</strong>：AMD MI300X — 算力接近但便宜，需评估 ROCm 适配成本。<br>
+  <strong>推理部署（追求国产化）</strong>：昇腾 910B — 政策合规，推理场景压力比训练低。<br>
+  <strong>推理部署（追求性价比）</strong>：NVIDIA L40S / AMD MI300X — 显存大，单卡成本低。<br>
+  <strong>全栈 Intel 路线（探索性）</strong>：Gaudi 3 — 架构独特，网口集成省网络成本，适合评估。
+</div>
+
+<h2>一张图总结</h2>
+
+<div class="summary-box">
+  <h3>GPU 芯片：AI 时代的发动机</h3>
+  <ul>
+    <li><strong>本质区别</strong>：CPU 是几个数学博士（串行 / 复杂逻辑），GPU 是几千个小学生（并行 / 海量简单计算）。大模型训练要的是后者。</li>
+    <li><strong>核心参数</strong>：算力（TFLOPS / FP16）决定训练速度；显存容量和带宽决定能塞多大的模型。"算力再大，显存不够也白搭。"</li>
+    <li><strong>市场格局</strong>：NVIDIA 市占率约 90%，护城河不光是芯片能跑多快，更是 18 年积累的 CUDA 软件生态。AMD 在硬追，华为受制裁但政策加持，Intel 走差异路线。</li>
+    <li><strong>选卡逻辑</strong>：训练看重算力和 NVLink 互联（多卡效率），推理看重显存容量和性价比。不是参数最高的卡就最好，要看场景匹配。</li>
+    <li><strong>硬件 + 软件才是完整产品</strong>：脱离 CUDA 谈 H100，脱离 CANN 谈昇腾，都是只看发动机不看变速箱。买 GPU 本质上是在选一个软件生态。</li>
+  </ul>
+</div>
+
+<h2>延伸阅读</h2>
+
+<ul>
+  <li><a href="https://www.nvidia.com/en-us/data-center/h100/" target="_blank" rel="noopener">NVIDIA H100 官方产品页</a> — 了解 H100 的完整规格、白皮书和技术架构细节</li>
+  <li><a href="https://www.amd.com/en/products/accelerators/instinct/mi300/mi300x.html" target="_blank" rel="noopener">AMD MI300X 官方产品页</a> — MI300X 架构介绍、ROCm 生态和性能基准测试</li>
+  <li><a href="https://developer.nvidia.com/cuda-zone" target="_blank" rel="noopener">NVIDIA CUDA 开发者专区</a> — 从零开始了解 CUDA 编程模型，深入理解为什么它有如此强大的生态粘性</li>
+</ul>
+
+<div class="callout">
+  <strong>下一节</strong><br>
+  GPU 芯片只是算力的"发动机"。发动机要发挥性能，还需要燃料系统——<strong>内存与显存（HBM）</strong>。下一节我们将深入了解为什么 AI 服务器对显存的吞噬是一般的计算机无法想象的，以及 HBM 为什么供不应求。
+</div>
+
+</main>
+
+<script src="../js/nav.js"></script>
+</body>
+</html>

@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GPU 服务器整机 — 智算中心服务器全栈知识</title>
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+
+<nav class="sidebar">
+  <h2>智算中心服务器<br>全栈知识</h2>
+  <div class="stage-title">阶段 1</div>
+  <a href="01-overview.html">全景图：什么是智算中心</a>
+  <div class="stage-title">阶段 2 · 算力</div>
+  <a href="02-1-gpu-chips.html">GPU 芯片</a>
+  <a href="02-2-memory.html">内存系统</a>
+  <a href="02-3-gpu-servers.html">GPU 服务器整机</a>
+  <div class="stage-title">阶段 3 · 网络</div>
+  <a href="03-network.html">网络互联</a>
+  <div class="stage-title">阶段 4 · 存储</div>
+  <a href="04-storage.html">存储系统</a>
+  <div class="stage-title">阶段 5 · 基础设施</div>
+  <a href="05-cooling-power.html">散热与供电</a>
+  <div class="stage-title">阶段 6 · 软件栈</div>
+  <a href="06-1-drivers.html">驱动与加速层</a>
+  <a href="06-2-containers.html">容器与资源调度</a>
+  <a href="06-3-training.html">分布式训练框架</a>
+  <a href="06-4-inference.html">推理引擎</a>
+  <a href="06-5-monitoring.html">集群管理与监控</a>
+  <div class="stage-title">总结</div>
+  <a href="07-summary.html">完整参考架构</a>
+</nav>
+
+<main class="main">
+
+  <h1>GPU 服务器整机 — 从芯片到一台能用的机器</h1>
+
+  <div class="callout">
+    <strong>本篇前置知识：</strong>建议先阅读 <a href="02-1-gpu-chips.html">GPU 芯片</a> 和 <a href="02-2-memory.html">内存系统</a>，了解 GPU 和 HBM 的基本概念后再看本章。
+  </div>
+
+  <h2>场景导入：GPU 芯片有了，然后呢？</h2>
+
+  <p>前面两章我们讲了 GPU 芯片和 HBM 显存（高带宽内存，High Bandwidth Memory）——它们是算力的核心。但一块裸露的 GPU 芯片不能直接拿来训练模型。它需要插在电路板上，配上 CPU（中央处理器）、内存、硬盘、网卡、电源、风扇，装进一个机箱里，才能成为一台可用的服务器。</p>
+
+  <p>这个过程听起来像"攒电脑"，但实际上 GPU 服务器的复杂度远超一台普通 PC。一台高端的 GPU 服务器是多个子系统在极端物理条件下的紧密耦合——它的设计决定了散热能不能压住上千瓦的热量、八张 GPU 之间能不能高效通信、机柜能不能装得下也供得起。</p>
+
+  <p>本章回答三个问题：<strong>GPU 服务器长什么样？NVIDIA 是怎么控制整机生态的？市面上的品牌该怎么选？</strong></p>
+
+  <h2>为什么 GPU 服务器和普通服务器完全不同？</h2>
+
+  <p>普通服务器（也就是我们常见的数据中心服务器）通常装 1-2 颗 CPU，没有独立 GPU，或者最多插一张低功耗 GPU 做视频编解码。它的整机功耗大概 300-500W，2U 高（1U = 4.445cm，是机柜高度的标准单位），插上电就能跑。</p>
+
+  <p>一台 8-GPU 的 AI 训练服务器则完全是另一个物种：</p>
+
+  <table>
+    <tr><th>对比维度</th><th>普通服务器</th><th>8-GPU AI 训练服务器</th></tr>
+    <tr><td>GPU 数量</td><td>0-1 张（低功耗）</td><td>8 张（每张 700W）</td></tr>
+    <tr><td>整机功耗</td><td>300-500W</td><td>8,000-12,000W</td></tr>
+    <tr><td>高度</td><td>1U-2U</td><td>4U-8U</td></tr>
+    <tr><td>重量</td><td>15-25kg</td><td>100-150kg</td></tr>
+    <tr><td>散热方式</td><td>风冷</td><td>液冷为主，风冷为辅</td></tr>
+    <tr><td>GPU 互联</td><td>无特殊要求</td><td>需要 NVSwitch/NVLink 高速互联</td></tr>
+    <tr><td>网络</td><td>1-2 张万兆网卡</td><td>4-8 张 400G/800G 高速网卡</td></tr>
+    <tr><td>典型单价</td><td>3-10 万元</td><td>200-350 万元</td></tr>
+  </table>
+
+  <p>一句话概括：<strong>GPU 服务器是电力、散热和互联密度三个极限同时逼近边界的产物。</strong>而这一切的设计逻辑，都要从 NVIDIA 对整机体系的三层控制说起。</p>
+
+  <h2>核心概念 1：NVIDIA 的三种体系 —— DGX、HGX、MGX</h2>
+
+  <p>理解 GPU 服务器的市场，必须先理解 NVIDIA 是怎么卖东西的。NVIDIA 不只是卖 GPU 芯片——它通过三种产品形态，从紧到松控制着整个 AI 服务器的设计标准。</p>
+
+  <div class="concept-cards">
+    <div class="concept-card">
+      <h4>DGX（整机）</h4>
+      <p>NVIDIA 自己设计、自己制造、自己销售的完整服务器。买回来插电就能用，软硬件一体，像苹果的产品逻辑。</p>
+    </div>
+    <div class="concept-card">
+      <h4>HGX（GPU 模组）</h4>
+      <p>NVIDIA 把 8 张 GPU + NVSwitch 集成在一块基板上，作为"半成品"卖给 Dell、HPE、联想等 OEM 厂商。</p>
+    </div>
+    <div class="concept-card">
+      <h4>MGX（模块化设计）</h4>
+      <p>更灵活的参考设计。OEM 厂商可以像搭积木一样，在不同规格的机箱里选配 GPU、CPU、网络模块的组合。</p>
+    </div>
+  </div>
+
+  <h3>DGX：原厂的完整答案</h3>
+
+  <p>DGX 是 NVIDIA 的旗舰整机品牌。以 DGX H100 为例：一台机器里装了 8 张 H100 GPU（每张含 80GB HBM3 显存），2 颗 Intel Xeon 或 AMD EPYC CPU，2TB 系统内存（DRAM），8 张 ConnectX-7 400G 网卡，以及全套的 NVSwitch 互联背板。</p>
+
+  <p>DGX 的核心理念是"开箱即用"（out-of-box experience）。你不需要自己去研究 GPU 和 CPU 的搭配、散热怎么设计、BIOS 怎么调——NVIDIA 全部做好了。DGX 预装了 NVIDIA 的软件栈（CUDA、驱动、容器运行时），硬件和软件经过 NVIDIA 的完整验证。</p>
+
+  <p>代价是价格。一台 DGX H100 的价格通常在 30 万美元以上（约 220 万人民币），同等配置的 OEM 服务器可能便宜 15%-25%。而且 DGX 的供应完全受 NVIDIA 控制——交期、数量、分配都没有太多议价空间。</p>
+
+  <div class="callout warn">
+    <strong>注意：</strong>DGX 是美国出口管制的重点对象。2023 年 10 月之后，DGX H100 不能直接卖给中国客户。中国市场的替代方案是通过 OEM 厂商购买基于 HGX 模组的服务器（使用降规的 H800/A800），或者走全国产的华为 Atlas 路线。
+  </div>
+
+  <h3>HGX：把核心模组交给 OEM</h3>
+
+  <p>HGX 是 NVIDIA 的"半成品"策略。NVIDIA 把最核心的部分——8 张 GPU 通过 NVLink 互联，再通过 NVSwitch 芯片做全互联，集成在一块高密度基板（baseboard）上——做成一个标准化的 GPU 模组。这个模组叫做 <strong>HGX baseboard</strong>。</p>
+
+  <p>然后 NVIDIA 把这个模组卖给 OEM 厂商（Dell、HPE、联想、超微等）。OEM 厂商的工作是：加上自己的主板（含 CPU 和系统内存）、机箱、电源、散热方案、管理软件（比如 Dell 的 iDRAC、HPE 的 iLO），封装成一台完整的服务器。</p>
+
+  <p>这个模式有一个很恰当的类比：<strong>就像 Intel 把 CPU 和芯片组卖给 OEM，后者做成自己的电脑。</strong>NVIDIA 控制了最核心的 GPU 互联技术，OEM 在剩余的空间里做差异化和交付。</p>
+
+  <h3>MGX：模块化的未来方向</h3>
+
+  <p>MGX 是 NVIDIA 在 2023 年推出的最新设计体系，目标是让 OEM 有更大的灵活性。MGX 定义了标准化的机箱尺寸、主板布局、散热接口和电源规范，OEM 可以在同一个基础架构上选配不同世代、不同数量的 GPU。</p>
+
+  <p>打个比方：DGX 像买一套精装修房，HGX 像买核心建材自己盖，MGX 像是标准化的装配式建筑——墙、梁、柱的接口都定好了，你可以自由选择不同的房间布局和外立面。</p>
+
+  <p>MGX 目前在市场推广初期，尚未成为主流，但代表了 NVIDIA 向更开放生态迈出的一步。</p>
+
+  <h2>核心概念 2：NVLink 和 NVSwitch —— GPU 之间的"高速公路"</h2>
+
+  <p>一台 8-GPU 的服务器不是把 8 张卡插进 PCIe 槽就完事了。如果你这样做，GPU 之间的通信必须经过 PCIe 总线（外设互连标准，Peripheral Component Interconnect Express）——这是设计之初为了连接硬盘、网卡、显卡等外设而定的协议，不是为 8 张 GPU 之间互相高速传数据而设计的。</p>
+
+  <p>训练一个大模型时，8 张 GPU 需要不断地互相传数据——梯度同步（gradient synchronization）、模型参数的广播（broadcast）——如果走 PCIe，延迟高、带宽低，会成为整个训练过程的瓶颈。</p>
+
+  <h3>NVLink：GPU 之间的直连通道</h3>
+
+  <p>NVLink 是 NVIDIA 专为 GPU-to-GPU 通信设计的高速互联协议。可以理解为"在 GPU 之间修了一条专属高速公路"，不走 PCIe 这条拥堵的城市道路。</p>
+
+  <p>关键数据：</p>
+  <ul>
+    <li><strong>第四代 NVLink</strong>（H100 使用）：单链路双向带宽 900 GB/s（每秒 9000 亿字节），是 PCIe Gen5 x16（约 128 GB/s）的 7 倍。</li>
+    <li>每张 H100 GPU 有 <strong>18 条 NVLink 通道</strong>，可以同时和多个 GPU 直连通信。</li>
+  </ul>
+
+  <h3>NVSwitch：让八个 GPU 围坐一桌</h3>
+
+  <p>NVLink 解决了"点对点"的问题，但还有"全互联"的问题。如果 8 张 GPU 两两之间都要直连，需要非常复杂的布线——每张 GPU 和其余 7 张各连一条线，总共 28 对连接，物理上几乎不可行。</p>
+
+  <p><strong>NVSwitch 芯片</strong>就是解决这个问题的。NVSwitch 是一个高速交换机芯片，它连接着服务器里的全部 8 张 GPU，任何一张 GPU 都可以通过 NVSwitch 以全速（full bandwidth）和任何另一张 GPU 通信，不需要经过中间 GPU 转发。</p>
+
+  <p>一个比喻：</p>
+  <ul>
+    <li><strong>没有 NVSwitch</strong>：8 个人坐在不同的房间，只能通过一个中央信箱（PCIe）传递纸条——每次只能一个人写信、一个人收信，其他人等着。</li>
+    <li><strong>有了 NVSwitch</strong>：8 个人围坐在一张圆桌旁，每个人可以同时和任何其他人说话——全双工、全带宽。</li>
+  </ul>
+
+  <p>在 DGX H100 中，使用了 <strong>4 颗 NVSwitch 芯片</strong>，提供 8 个 GPU 之间的全互联（fully connected all-to-all），总聚合带宽达到 3.6 TB/s。</p>
+
+  <h2>核心概念 3：PCIe —— 连接 GPU 与外部世界的"主动脉"</h2>
+
+  <p>NVLink 解决了 GPU 之间的问题，但 GPU 还需要和 CPU、网卡、存储通信——这些通路走的是 PCIe。</p>
+
+  <p>PCIe（Peripheral Component Interconnect Express，外设组件互连标准）是计算机里最通用的高速总线协议。你可以把它理解为"主板上的高速公路网"——CPU 通过 PCIe 连接 GPU、NVMe 硬盘（非易失性内存标准固态硬盘）、网卡等所有高速外设。</p>
+
+  <p>在 GPU 服务器里，PCIe 承担着两个关键角色：</p>
+  <ol>
+    <li><strong>CPU 到 GPU 的连接：</strong>CPU 通过 PCIe 向 GPU 下发指令、传输数据。如果这个通路不够宽，CPU 喂数据给 GPU 的速度就跟不上 GPU 的算力。</li>
+    <li><strong>GPU 到网卡的连接：</strong>在多机训练时，每台服务器要通过网卡把本机的梯度数据发给其他服务器。GPU 和网卡之间的 PCIe 带宽决定了数据出去的速率。</li>
+  </ol>
+
+  <p>当前主流是 <strong>PCIe Gen5（第五代）</strong>，单条通道（lane）的带宽约 4 GB/s。一个 x16 插槽（16 条通道绑定在一起）提供约 <strong>64 GB/s 的单向带宽，双向约 128 GB/s</strong>。</p>
+
+  <p>在 DGX H100 的设计中，每张 GPU 通过 PCIe Gen5 x16 连接 CPU 或 PCIe Switch（PCIe 交换芯片），确保数据出入 GPU 的路径足够宽。</p>
+
+  <div class="callout">
+    <strong>对销售人员来说的关键信息：</strong>当你听到客户问"这台服务器有没有 PCIe 瓶颈"时，他们关心的其实是——CPU 喂数据给 GPU 够不够快？GPU 往外发数据给网卡够不够快？答案是：对于大模型训练，PCIe 通常不是最大瓶颈（NVLink 带宽更关键）；但对于推理（推理，即让训练好的模型对外提供服务），PCIe 可能成为瓶颈，因为每个请求的数据都要通过 PCIe 进出 GPU。
+  </div>
+
+  <h2>一台 8-GPU 服务器到底长什么样？</h2>
+
+  <p>上面对比了普通服务器和 GPU 服务器的参数差距，但数字不如实际感受直观。让我们拆开来看一台典型的 8-GPU 训练服务器——以 DGX H100 为例。</p>
+
+  <h3>物理形态</h3>
+
+  <p>DGX H100 的高度是 8U（约 35.6 厘米），深度约 90 厘米，重量约 <strong>130 公斤</strong>。这不是一个人能搬动的设备——数据中心需要用液压升降机（server lift）来上架。两台 DGX H100 就能占满一层 42U 标准机柜的重量上限。</p>
+
+  <p>打开机箱盖，你会看到：</p>
+  <ul>
+    <li><strong>中间区域：</strong>HGX GPU 基板，8 张 H100 GPU 通过 NVLink + NVSwitch 紧密互联，整个基板像一个"算力核"。GPU 上面覆盖着液冷板（cold plate），冷却液在其中循环带走热量。</li>
+    <li><strong>后方：</strong>2 颗服务器 CPU（Intel Xeon 或 AMD EPYC），旁边插着 DDR5 系统内存条（通常是 16-32 根，总容量 1-2TB）。</li>
+    <li><strong>两侧：</strong>4-8 张 ConnectX-7 高速网卡（每张 400Gbps），用于连接外部网络和其他服务器。</li>
+    <li><strong>底部：</strong>多个 NVMe SSD 硬盘（通常是 2-4 块，每块 3.84TB-7.68TB），用于本地存储操作系统和临时数据。</li>
+    <li><strong>尾部：</strong>3-4 个冗余电源模块，每个功率 3000-3300W。任意一个电源坏了，其余电源仍能支撑整机运行。</li>
+  </ul>
+
+  <h3>散热设计：六成在芯片，四成在风道</h3>
+
+  <p>你可能觉得"用了液冷就不用管风了"——这是一个常见的误解。</p>
+
+  <p>液冷（通常是冷板式液冷，cold plate liquid cooling）只覆盖了 GPU、CPU 和 NVSwitch 这几个最热的芯片。但服务器里还有内存条、网卡、电源模块、硬盘——这些部件仍然需要风扇散热。同时，液冷板不可能覆盖芯片的每一个角落，芯片周围的电路板（PCB）也需要气流带走热量。</p>
+
+  <p>所以，即使是液冷服务器，<strong>机箱内部的风道设计仍然极其关键</strong>。DGX H100 的设计中，前端进风、后端出风，气流经过精心规划的通道，依次经过内存、硬盘，再到达 GPU 区域。任何风道设计的缺陷——比如气流短路、死角积热——都可能导致某个部件过热，引发降频或宕机。</p>
+
+  <h3>机柜层面：为什么一个 42U 机柜只放 2-4 台 GPU 服务器？</h3>
+
+  <p>标准数据中心机柜是 42U 高。按高度算，8U 的 DGX H100 可以放 5 台（5 × 8U = 40U）。但实际上大多数数据中心只敢放 <strong>2-4 台</strong>。原因有三个：</p>
+
+  <ol>
+    <li><strong>电力限制：</strong>一个标准机柜的单路供电通常 10-15kW。一台 DGX H100 峰值功耗 ~10kW，两台就满了。要放更多需要改造配电，甚至拉双路或三路供电。</li>
+    <li><strong>散热限制：</strong>机柜功耗超过 30kW 后，传统风冷机房完全无法散热，必须升级为液冷（直接到芯片的冷却液循环），而液冷改造需要重新铺设管路，成本和工期都不低。</li>
+    <li><strong>地板承重：</strong>一台 130kg 的 DGX，4 台就是 520kg。加上机柜自身、配电和网络设备，总重可能超过 800kg。老机房的高架地板（raised floor）承重标准可能只有 500kg/m²。</li>
+  </ol>
+
+  <p>所以在实际规划中，一个 42U 机柜放 2 台 DGX 是最常见也最安全的配置。</p>
+
+  <h2>重点章节：品牌选择 —— 市面上的 GPU 服务器怎么选？</h2>
+
+  <p>对于销售和采购决策者而言，理解不同厂商的定位和优劣势，比理解技术细节更重要。下面逐家分析。</p>
+
+  <h3>品牌全景对比</h3>
+
+  <table>
+    <tr><th>厂商</th><th>主力 GPU 服务器</th><th>GPU 支持</th><th>定位与特点</th></tr>
+    <tr>
+      <td><strong>NVIDIA</strong></td>
+      <td>DGX H100 / DGX B200</td>
+      <td>8× H100 / B200</td>
+      <td>原厂标杆。软硬一体，开箱即用，价格最高。适合追求 zero-touch 体验的顶级客户。</td>
+    </tr>
+    <tr>
+      <td><strong>Dell</strong></td>
+      <td>PowerEdge XE9680</td>
+      <td>8× H100 / B200</td>
+      <td>全球服务器出货量第一。用 HGX 模组 + 自家机箱/散热/iDRAC 管理。供应链和售后覆盖最广。</td>
+    </tr>
+    <tr>
+      <td><strong>HPE</strong></td>
+      <td>ProLiant DL380a</td>
+      <td>8× H100</td>
+      <td>企业级市场深耕多年。iLO 管理芯片和 HPE GreenLake（按用量计费）是独特优势。</td>
+    </tr>
+    <tr>
+      <td><strong>联想</strong></td>
+      <td>ThinkSystem SR780a</td>
+      <td>8× H100</td>
+      <td>中国市场根基深厚，政企和教育客户关系强。供应链在中国有本地化优势。</td>
+    </tr>
+    <tr>
+      <td><strong>浪潮</strong></td>
+      <td>NF5688M6</td>
+      <td>8× A800 / H800</td>
+      <td>中国 AI 服务器出货量最大。深度绑定阿里、腾讯、字节等互联网大厂。对国内客户的定制响应快。</td>
+    </tr>
+    <tr>
+      <td><strong>超微 (Supermicro)</strong></td>
+      <td>SYS-821GE-TNHR</td>
+      <td>8× H100 / B200</td>
+      <td>性价比路线。美国设计、台湾制造，品种多、交期短、价格灵活。适合对成本敏感的中型客户。</td>
+    </tr>
+    <tr>
+      <td><strong>华为</strong></td>
+      <td>Atlas 900 训练集群</td>
+      <td>昇腾 910B</td>
+      <td>被制裁后走全国产路线，从芯片（昇腾）到服务器（Atlas）到软件（CANN/MindSpore）全自研。适合有国产化刚需的客户。</td>
+    </tr>
+  </table>
+
+  <h3>逐家详解</h3>
+
+  <h4>Dell PowerEdge XE9680</h4>
+  <p>Dell 是全球服务器市场份额第一的厂商（连续多年 IDC 数据显示 15%-18% 市占），其 AI 服务器策略很明确：用 NVIDIA 的 HGX 模组，搭配自己成熟的 PowerEdge 平台。XE9680 是 Dell 的旗舰 8-GPU 机型，6U 高，支持 H100 和 B200。</p>
+  <p>Dell 的核心优势不在技术差异化（GPU 模组都是 NVIDIA 的），而在 <strong>交付能力</strong>：全球 170 多个国家的售后网络、成熟的供应链、统一的管理平台（iDRAC + OpenManage）。对跨国企业或需要全球部署的客户，Dell 是风险最低的选择。</p>
+
+  <h4>HPE ProLiant DL380a</h4>
+  <p>HPE（惠普企业）是服务器市场的另一极。DL380a 基于经典的 ProLiant 平台（ProLiant 是 HPE 最畅销的服务器产品线，已出货超过 400 万台）。HPE 的独特卖点有两个：一是 iLO（集成管理芯片，Integrated Lights-Out）远程管理技术经过二十多年的打磨，成熟度高；二是 HPE GreenLake 提供"按使用量付费"的消费模式，客户不需要一次性支付全部采购成本。</p>
+  <p>对于预算审批流程复杂、偏好 OPEX（运营支出）而非 CAPEX（资本支出）的企业客户，HPE GreenLake 可能比硬件规格本身更有说服力。</p>
+
+  <h4>联想 ThinkSystem SR780a</h4>
+  <p>联想在中国服务器市场有其独特地位。ThinkSystem 品牌源自 IBM System x（2014 年联想收购），继承了 IBM 的服务器设计和品控体系。SR780a 是联想的 8-GPU AI 训练机型。</p>
+  <p>联想的优势在于中国市场的 <strong>政企关系</strong>：政府、教育、国企是联想服务器的传统根据地。如果你面对的是一个需要"国内大品牌 + 本地化服务 + 数据不出境"的客户，联想是优先考虑的选择。</p>
+
+  <h4>浪潮 NF5688M6</h4>
+  <p>浪潮信息（Inspur）是中国 AI 服务器市场出货量最大的厂商。它的崛起和国内互联网大厂的 AI 军备竞赛直接相关——阿里、腾讯、字节跳动、百度都是浪潮的核心客户。</p>
+  <p>浪潮的服务器主要基于 NVIDIA HGX 模组，使用针对中国市场的 GPU（A800/H800——H100 的出口管制合规版本，NVLink 带宽从 900GB/s 降到 400GB/s）。浪潮的竞争优势在于 <strong>对国内互联网客户需求的理解和响应速度</strong>——比如能快速针对客户的特定散热或物理尺寸需求做定制。但在海外市场几乎没有存在感。</p>
+  <p>需要注意的是，2023 年浪潮被美国列入实体清单（Entity List），这对其获取 NVIDIA GPU 的稳定性造成了影响。</p>
+
+  <h4>超微 Supermicro SYS-821GE-TNHR</h4>
+  <p>超微（Supermicro）走的路线和其他几家完全不同。它不做品牌溢价，不强调管理软件生态，专注于 <strong>快速迭代、多品种、低价格</strong>。</p>
+  <p>超微的模式是：NVIDIA 发布新 GPU 的当天，超微几乎同时发布对应服务器。它的设计在美国硅谷总部完成，制造在台湾的工厂，供应链非常敏捷。交期通常比 Dell/HPE 短 30%-50%。</p>
+  <p>代价是售后和软件体验不如 Dell/HPE/联想。但如果你是一个预算有限的中型企业，或者一个需要快速扩充算力的 AI 创业公司，超微往往是最务实的选择。</p>
+  <p>超微在美国的 AI 服务器市场份额增长非常快，部分原因是它拿 GPU（即能从 NVIDIA 分到芯片配额）的能力比中小 OEM 强。</p>
+
+  <h4>华为 Atlas 900</h4>
+  <p>华为 Atlas 是全国产路线的代表——从芯片（昇腾 910B）、到互联（HCCS，华为自研的高速缓存一致性互联协议，对标 NVLink）、到服务器（Atlas 800T/900）、到软件框架（CANN 异构计算架构和 MindSpore 深度学习框架），全自研。</p>
+  <p>由于美国制裁，华为无法使用 NVIDIA GPU 或任何含有美国技术的先进芯片。Atlas 路线的定位就是"在不需要 NVIDIA 的情况下，搭建可用的 AI 算力基础设施"。</p>
+  <p>现实地说，昇腾芯片的算力和生态成熟度和 H100 仍有差距——但这份差距在快速缩小。而且对于中国的政府、金融、电信等"信创（信息技术应用创新，即国产化替代）"刚需市场，华为 Atlas 是唯一一个能从芯片到集群交付完整方案的选择。</p>
+  <p>一个关键的对比视角：<strong>NVIDIA 体系靠 CUDA 生态锁定开发者，华为体系靠国产化政策锁定客户。</strong>在可预见的未来，两种路线会长期并存，客户根据自身需求选择。</p>
+
+  <div class="callout">
+    <strong>给销售人员的品牌选择决策框架（销售专用）：</strong><br>
+    - 客户是外企/跨国企业，预算充足，要全球部署 → <strong>Dell</strong><br>
+    - 客户是外企/跨国企业，偏好按用量付费 → <strong>HPE GreenLake</strong><br>
+    - 客户是国企/政府/学校，要本地化服务 → <strong>联想</strong><br>
+    - 客户是国内互联网大厂，大批量采购，要定制 → <strong>浪潮</strong><br>
+    - 客户是中小企业/AI 创业公司，预算有限，要快速交付 → <strong>超微</strong><br>
+    - 客户有国产化硬性要求，不能使用 NVIDIA → <strong>华为 Atlas</strong><br>
+    - 客户不计成本只要最好 → <strong>NVIDIA DGX</strong>
+  </div>
+
+  <h2>技术要点速览</h2>
+
+  <p>以下是一台典型 8-GPU AI 训练服务器的核心技术参数，便于你在阅读时对照：</p>
+
+  <table>
+    <tr><th>子系统</th><th>典型配置</th><th>说明</th></tr>
+    <tr><td>GPU</td><td>8× H100 SXM (700W TDP)</td><td>SXM 是 NVIDIA 的高端 GPU 封装形态，焊接在基板上，不可插拔</td></tr>
+    <tr><td>GPU 显存</td><td>每 GPU 80GB HBM3，总计 640GB</td><td>8 张 GPU 的显存可被 NVLink 聚合为统一地址空间</td></tr>
+    <tr><td>GPU 互联</td><td>4× NVSwitch，3.6TB/s 聚合带宽</td><td>全互联，任意两张 GPU 之间全速通信</td></tr>
+    <tr><td>CPU</td><td>2× Intel Xeon 8480+ (56 核) 或 2× AMD EPYC 9654 (96 核)</td><td>CPU 负责数据处理、模型编译、分布式协调</td></tr>
+    <tr><td>系统内存</td><td>2TB DDR5 ECC</td><td>ECC（纠错码内存）保证数据不出错</td></tr>
+    <tr><td>本地存储</td><td>4× 3.84TB NVMe SSD (RAID 0)</td><td>仅用于系统盘和临时缓存，训练数据放外部存储</td></tr>
+    <tr><td>网络</td><td>8× ConnectX-7 400G (或 4× ConnectX-8 800G)</td><td>每 GPU 对应一张网卡（1:1 配比），数据进出不排队</td></tr>
+    <tr><td>电源</td><td>4× 3300W 冗余电源 (N+1)</td><td>任意一个电源故障不影响运行</td></tr>
+    <tr><td>散热</td><td>冷板式液冷 + 冗余风扇</td><td>GPU/CPU 液冷，其余部件风冷</td></tr>
+  </table>
+
+  <h2>延伸阅读</h2>
+  <ul>
+    <li><a href="https://www.nvidia.com/en-us/data-center/dgx-h100/" target="_blank" rel="noopener">NVIDIA DGX H100 官方规格页</a> — 参数细节和技术白皮书</li>
+    <li><a href="https://www.nvidia.com/en-us/data-center/hgx/" target="_blank" rel="noopener">NVIDIA HGX 平台概览</a> — 了解 HGX 模组的不同配置选项</li>
+    <li><a href="https://www.supermicro.com/en/products/system/GPU" target="_blank" rel="noopener">Supermicro GPU 服务器产品线</a> — 对比超微的产品线，了解性价比路线的具体做法</li>
+  </ul>
+
+  <div class="summary-box">
+    <h3>一张图总结</h3>
+    <p>GPU 服务器不是把 GPU 插进普通服务器就行了——它需要 NVSwitch 做全互联，需要液冷加风冷的混合散热，需要单个机柜就供上 20kW 以上的电力。物理上，它又重又深，一台机器要两个人加一台升降机才能上架。</p>
+    <p>NVIDIA 通过三层产品体系（DGX 整机、HGX 模组、MGX 模块化设计）控制着整个 GPU 服务器的设计标准。OEM 厂商——Dell、HPE、联想、浪潮、超微——基于 NVIDIA 的 HGX 模组做定制和交付，在品牌、售后、价格上形成差异化。华为 Atlas 是全国产化路线，用自研的昇腾芯片和 CANN 软件替代 NVIDIA 生态。</p>
+    <p>从市场角度看，选择哪家 GPU 服务器，本质上是在 <strong>"NVIDIA 兼容生态"和"国产化自主可控"</strong>之间做权衡，然后在各自阵营里根据交付能力、价格、服务网络选具体品牌。</p>
+  </div>
+
+</main>
+
+<script src="../js/nav.js"></script>
+</body>
+</html>

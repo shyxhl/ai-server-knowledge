@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>完整参考架构 — 智算中心服务器全栈知识</title>
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+
+<nav class="sidebar">
+  <h2>智算中心服务器<br>全栈知识</h2>
+  <div class="stage-title">阶段 1</div>
+  <a href="01-overview.html">全景图：什么是智算中心</a>
+  <div class="stage-title">阶段 2 · 算力</div>
+  <a href="02-1-gpu-chips.html">GPU 芯片</a>
+  <a href="02-2-memory.html">内存系统</a>
+  <a href="02-3-gpu-servers.html">GPU 服务器整机</a>
+  <div class="stage-title">阶段 3 · 网络</div>
+  <a href="03-network.html">网络互联</a>
+  <div class="stage-title">阶段 4 · 存储</div>
+  <a href="04-storage.html">存储系统</a>
+  <div class="stage-title">阶段 5 · 基础设施</div>
+  <a href="05-cooling-power.html">散热与供电</a>
+  <div class="stage-title">阶段 6 · 软件栈</div>
+  <a href="06-1-drivers.html">驱动与加速层</a>
+  <a href="06-2-containers.html">容器与资源调度</a>
+  <a href="06-3-training.html">分布式训练框架</a>
+  <a href="06-4-inference.html">推理引擎</a>
+  <a href="06-5-monitoring.html">集群管理与监控</a>
+  <div class="stage-title">总结</div>
+  <a href="07-summary.html">完整参考架构</a>
+</nav>
+
+<main class="main">
+
+<h1>总结篇：完整参考架构</h1>
+
+<p>从第一篇全景图开始，我们沿着一条清晰的线索走了七个阶段：算力从哪来、数据怎么传、数据存在哪、热量怎么散、软件怎么调度。每一层单拿出来都是一个专业领域，但真正重要的从来不是某一层的孤立马力，而是这些层在一起时能协同到什么程度。</p>
+
+<p>这一篇是整个系列的总答案。如果你只有时间读一篇，就读这篇。它会把每一层浓缩成一段话，然后以一张千卡训练集群的真实配置表告诉你"一台真正的智算中心长什么样"，最后给出一个你可以直接和客户、同事、上级沟通的判断框架。</p>
+
+<div class="callout">
+  <strong>阅读建议：</strong>这篇可以当作"独立速览"——如果你已经读过前面各篇，这里帮你串起来；如果没读过，这里给你一个完整的地图，知道什么信息在哪一章能找到。
+</div>
+
+<h2>一、全链路回顾</h2>
+
+<p>从底向上，一个智算中心的七层架构和它们各自解决的核心问题：</p>
+
+<h3>阶段 1 · 全景图</h3>
+<p>智算中心是为大规模 AI 训练和推理专门优化过的数据中心。它和传统数据中心的本质区别不是"多了 GPU"，而是整个设计逻辑从 CPU 为中心转向 GPU 为中心——网络、存储、散热、供电全部围绕"如何让几千张 GPU 高效地一起工作"重新设计。<a href="01-overview.html">回顾全文</a></p>
+
+<h3>阶段 2 · 算力（GPU 芯片 + 内存 + 服务器整机）</h3>
+<p>算力层是智算中心的心脏。GPU 通过几千个简单核心并行处理矩阵运算，Tensor Core 把 AI 最核心的矩阵乘法硬件化，HBM 以 3-8 TB/s 的带宽把数据喂给计算单元。一台 8-GPU 服务器不是"一台电脑插了八张显卡"——它的整机功耗超过 10kW，需要液冷降温，内部通过 NVSwitch 让八张 GPU 之间以近 1 TB/s 的速度通信。NVIDIA 通过 DGX/HGX/MGX 三种产品形态从紧到松地控制着整机生态。<a href="02-1-gpu-chips.html">GPU 芯片</a> · <a href="02-2-memory.html">内存系统</a> · <a href="02-3-gpu-servers.html">服务器整机</a></p>
+
+<h3>阶段 3 · 网络</h3>
+<p>几千张 GPU 同时训练时，每轮迭代都要交换梯度数据。GPU 有 30%-50% 的时间在等网络传输——网络带宽直接决定你能发挥多少算力。RDMA 让数据绕开 CPU 直达 GPU 显存，InfiniBand 是万卡训练集群的标配（延迟约 1 微秒），RoCE v2 在以太网上跑 RDMA 作为降本替代。NVIDIA 通过收购 Mellanox 控制了从 NVLink 到 Quantum 交换机的全链路，网络设备占集群总成本 15%-25%。<a href="03-network.html">回顾全文</a></p>
+
+<h3>阶段 4 · 存储</h3>
+<p>AI 训练存储的核心不是"仓库"（存多少），而是"传送带"（传多快）。1000 张 H100 同时训练需要 100-300 GB/s 的持续读取吞吐量——普通 NFS 完全不够用。并行文件系统（Lustre/GPFS/WekaFS）让数据分散在几十台存储服务器上并行读取，带宽线性扩展。GPU Direct Storage 让数据从 NVMe SSD 直通 GPU 显存，完全绕开 CPU。存储只占总成本 5%-10%，但配不够会让 GPU 大量空转——省小钱亏大钱。<a href="04-storage.html">回顾全文</a></p>
+
+<h3>阶段 5 · 基础设施（散热与供电）</h3>
+<p>一张 B200 GPU 功耗 1000W，一台 8-GPU 服务器轻松超过 10kW，一个 1000 卡集群的 IT 功耗约 1.5MW——加上散热后总功耗约 2.5MW，相当于约 2500 个家庭同时开空调。风冷已经压不住这种密度：B200 标配液冷，进水温 20-30 度的冷板液冷正在成为主流。供电端需要双路市电 + UPS + 柴油发电机的冗余架构，可靠性要求 99.99% 以上——因为训练跑了三周后断电，损失的不是电费是几千万 GPU 小时的算力。<a href="05-cooling-power.html">回顾全文</a></p>
+
+<h3>阶段 6 · 软件栈</h3>
+<p>硬件决定算力上限，软件决定实际能发挥多少。CUDA 是 NVIDIA 最深的护城河——不是芯片，而是 18 年积累的编程生态。往上是容器和资源调度（Kubernetes + Slurm 负责 GPU 分配和排队），再往上是训练框架（PyTorch + DeepSpeed 负责分布式训练的内存和通信优化）、推理引擎（TensorRT-LLM / vLLM 负责模型部署时的延迟和吞吐优化），最上层是集群监控（Prometheus + Grafana + DCGM 负责几千张 GPU 的健康和利用率可视化）。<a href="06-1-drivers.html">驱动</a> · <a href="06-2-containers.html">容器</a> · <a href="06-3-training.html">训练</a> · <a href="06-4-inference.html">推理</a> · <a href="06-5-monitoring.html">监控</a></p>
+
+<h2>二、千卡训练集群参考配置</h2>
+
+<p>下面是一个真实的 1024-GPU 大模型训练集群的参考规格。这不是"理论设计"，而是根据多家云厂商和科技公司公开的集群配置整理的典型值。如果你需要写方案、做报价、跟客户沟通集群规格，这张表可以作为起点。</p>
+
+<h3>集群总体参数</h3>
+
+<table>
+  <tr><th>参数</th><th>数值</th><th>说明</th></tr>
+  <tr><td>GPU 总数</td><td>1024 张</td><td>128 台服务器 x 每台 8 张 GPU</td></tr>
+  <tr><td>服务器节点数</td><td>128 台</td><td>每台 8 GPU + 2 CPU + 2TB DRAM</td></tr>
+  <tr><td>总算力（FP16）</td><td>约 2.0 ExaFLOPS</td><td>1024 x 1979 TFLOPS（H100 SXM）</td></tr>
+  <tr><td>总显存</td><td>约 82 TB（HBM3）</td><td>1024 x 80 GB；若是 H200 则为 144 TB</td></tr>
+  <tr><td>总 IT 功耗</td><td>约 1.5 MW</td><td>含 GPU、CPU、网络、存储</td></tr>
+  <tr><td>总功耗（含散热）</td><td>约 2.5 MW</td><td>液冷 PUE（电源使用效率）约 1.15-1.25</td></tr>
+</table>
+
+<h3>计算子系统</h3>
+
+<table>
+  <tr><th>组件</th><th>规格</th><th>数量</th><th>说明</th></tr>
+  <tr><td>GPU</td><td>NVIDIA H100 SXM 80GB</td><td>1024 张</td><td>或 H200 141GB。单卡 700W，FP16 1979 TFLOPS</td></tr>
+  <tr><td>GPU 互联</td><td>NVSwitch + NVLink 4.0</td><td>每节点 4 颗 NVSwitch</td><td>机内 8 GPU 全互联，带宽 900 GB/s/GPU</td></tr>
+  <tr><td>CPU</td><td>Intel Xeon 8480+ / AMD EPYC 9654</td><td>256 颗（每节点 2 颗）</td><td>每节点 112-128 核心，负责数据预处理和协调</td></tr>
+  <tr><td>系统内存</td><td>DDR5-4800</td><td>每节点 2 TB</td><td>数据加载缓冲区，总集群约 256 TB</td></tr>
+  <tr><td>本地存储</td><td>NVMe SSD 8 TB x 4</td><td>每节点 32 TB</td><td>本地缓存、容器镜像、临时数据</td></tr>
+</table>
+
+<h3>网络子系统</h3>
+
+<table>
+  <tr><th>组件</th><th>规格</th><th>数量</th><th>说明</th></tr>
+  <tr><td>计算网络</td><td>InfiniBand NDR 400Gbps</td><td>每节点 8 端口</td><td>每 GPU 独享一个 400G 出口，总集群带宽约 400 Tbps</td></tr>
+  <tr><td>网卡</td><td>NVIDIA ConnectX-7</td><td>每节点 8 张</td><td>支持 RDMA、GPU Direct RDMA</td></tr>
+  <tr><td>Leaf 交换机</td><td>NVIDIA Quantum-2 (QM9700)</td><td>32 台</td><td>每台 64 端口 400G。每 4 节点接 2 台 Leaf（双归冗余）</td></tr>
+  <tr><td>Spine 交换机</td><td>NVIDIA Quantum-2</td><td>16 台</td><td>每台 Spine 与每台 Leaf 全互联</td></tr>
+  <tr><td>管理网络</td><td>以太网 25/100G</td><td>每节点 2 端口</td><td>带外管理（BMC）、监控数据、SSH 访问</td></tr>
+  <tr><td>存储网络</td><td>InfiniBand 或 200G RoCE</td><td>—</td><td>连接并行文件系统，与计算网络物理隔离</td></tr>
+  <tr><td>光模块</td><td>400G OSFP/QSFP-DD</td><td>约 800-1000 颗</td><td>多模为主（机柜间），少量单模（跨列/跨机房）</td></tr>
+</table>
+
+<h3>存储子系统</h3>
+
+<table>
+  <tr><th>组件</th><th>规格</th><th>数量</th><th>说明</th></tr>
+  <tr><td>并行文件系统</td><td>Lustre（通过 DDN A³I）或 WekaFS</td><td>1 套</td><td>全闪存或混合配置。POSIX 兼容，原生 RDMA 支持</td></tr>
+  <tr><td>读吞吐量</td><td>200 GB/s</td><td>—</td><td>满足 1024 GPU 同时读取训练数据，GPU 利用率 > 85%</td></tr>
+  <tr><td>写吞吐量</td><td>50 GB/s</td><td>—</td><td>Checkpoint 保存。1 TB checkpoint 约 20 秒写完</td></tr>
+  <tr><td>热存储容量</td><td>3 PB 有效（全 NVMe）</td><td>约 60 块 64TB NVMe SSD</td><td>当前训练数据集 + 近 3 天 checkpoint</td></tr>
+  <tr><td>温/冷存储容量</td><td>50 PB 裸容量</td><td>约 500 块 100TB SSD + HDD 混合</td><td>历史数据集、旧 checkpoint、模型归档</td></tr>
+  <tr><td>元数据服务器</td><td>2 台（主备）</td><td>—</td><td>NVMe 全闪存，100K+ IOPS，处理海量小文件目录操作</td></tr>
+</table>
+
+<h3>散热与供电子系统</h3>
+
+<table>
+  <tr><th>组件</th><th>规格</th><th>说明</th></tr>
+  <tr><td>散热方式</td><td>冷板液冷 + 风冷辅助</td><td>GPU 和 CPU 走液冷冷板，低功耗组件（网卡、SSD）走风冷。进水温 20-30°C，出水温 30-40°C</td></tr>
+  <tr><td>CDU（冷量分配单元）</td><td>3 台（N+1 冗余）</td><td>每台散热能力 800-1000 kW。主用 2 台各带 50% 负载，1 台冷备</td></tr>
+  <tr><td>冷却塔/冷水机组</td><td>室外冷却塔 + 冷冻水系统</td><td>根据气候条件可选自然冷却（Free Cooling）——室外温度低时直接用环境空气散热，大幅省电</td></tr>
+  <tr><td>PUE 目标</td><td>1.15-1.25</td><td>液冷 PUE 显著低于风冷（通常 1.4-1.6）。PUE = 总功耗 / IT 功耗，越接近 1.0 越好</td></tr>
+  <tr><td>市电接入</td><td>双路 10kV / 每路 3 MW</td><td>来自不同变电站，任一路独立供电都能带满全集群</td></tr>
+  <tr><td>UPS</td><td>15 分钟备电（约 600 kWh）</td><td>市电切换 + 柴油发电机启动的缓冲时间。训练任务不会中断但需要降频运行</td></tr>
+  <tr><td>柴油发电机</td><td>2 台 x 2 MW（N+1）</td><td>长时间断电后的保底。8-12 小时油箱容量，可外接油罐车延长</td></tr>
+  <tr><td>配电柜</td><td>智能列头柜 + 母线槽</td><td>每机柜配电 30-60 kW，通过母线槽灵活取电，支持动态负载调整</td></tr>
+</table>
+
+<h3>软件栈</h3>
+
+<table>
+  <tr><th>层级</th><th>组件</th><th>说明</th></tr>
+  <tr><td>操作系统</td><td>Ubuntu 22.04 LTS / Rocky Linux 9</td><td>NVIDIA 官方推荐。使用 HPC 内核（低延迟、大页面支持）</td></tr>
+  <tr><td>GPU 驱动</td><td>NVIDIA Driver 550+</td><td>支持 Hopper 架构，包含 CUDA 12.x 运行时</td></tr>
+  <tr><td>加速库</td><td>CUDA 12.x、cuDNN 9.x、NCCL 2.20+</td><td>NCCL 是分布式训练的通信库，多卡训练的性能核心依赖它</td></tr>
+  <tr><td>容器运行时</td><td>NVIDIA Container Toolkit + Docker</td><td>让容器可以透明访问 GPU，不需要在容器内装驱动</td></tr>
+  <tr><td>资源调度</td><td>Kubernetes + Slurm</td><td>K8s 管理长期服务（推理、Jupyter），Slurm 管理训练作业队列。两者通过配额互通</td></tr>
+  <tr><td>训练框架</td><td>PyTorch 2.x + DeepSpeed</td><td>PyTorch 是 AI 训练的"事实标准"框架，DeepSpeed 做 ZeRO 优化（显存节省和通信优化）</td></tr>
+  <tr><td>推理引擎</td><td>TensorRT-LLM / vLLM</td><td>模型部署为在线服务时的推理加速。支持连续批处理（Continuous Batching）、量化（INT4/INT8）</td></tr>
+  <tr><td>监控</td><td>Prometheus + Grafana + DCGM</td><td>DCGM 是 NVIDIA 专用 GPU 监控套件，暴露 GPU 利用率、显存、温度、ECC 错误等指标</td></tr>
+  <tr><td>日志</td><td>Loki + Grafana / ELK Stack</td><td>集中收集训练日志、系统日志、错误日志，支持全文搜索</td></tr>
+  <tr><td>作业管理</td><td>MLflow / W&B / TensorBoard</td><td>实验追踪、模型注册、训练可视化。帮助团队管理多个训练实验</td></tr>
+</table>
+
+<div class="callout warn">
+  <strong>成本拆解（参考值）：</strong>这个 1024-GPU 集群的硬件总投入约 8-12 亿元人民币。其中 GPU 服务器占 55%-60%，网络设备（交换机 + 光模块 + 线缆）占 18%-22%，存储占 8%-12%，散热基础设施占 5%-8%，供电基础设施占 5%-8%。这些比例会因规模、品牌选择（国产 vs 进口）、液冷方案差异而大幅浮动。最容易被低估的是网络成本——很多人把它当"配件"做预算，最后发现超支最多。
+</div>
+
+<h2>三、架构总图：分层结构</h2>
+
+<p>所有组件按照"谁依赖谁"的关系从上到下排列。上层调用下层的能力，下层对上层透明。</p>
+
+<table>
+  <tr><th>层</th><th>核心组件</th><th>作用</th><th>关键指标</th></tr>
+  <tr>
+    <td><strong>应用层</strong></td>
+    <td>PyTorch、DeepSpeed、vLLM、TensorRT-LLM、Jupyter</td>
+    <td>开发者直接接触的层面。写训练脚本、部署推理服务、做实验调试</td>
+    <td>训练吞吐（Tokens/s）、推理延迟（ms）、GPU 利用率</td>
+  </tr>
+  <tr>
+    <td><strong>调度层</strong></td>
+    <td>Kubernetes、Slurm、Volcano</td>
+    <td>GPU 资源分配和排队。决定"谁用哪张卡、用多久、用完怎么回收"</td>
+    <td>排队等待时间、GPU 分配率、作业完成率</td>
+  </tr>
+  <tr>
+    <td><strong>平台层</strong></td>
+    <td>CUDA、cuDNN、NCCL、ROCm（AMD）、CANN（华为）</td>
+    <td>GPU 加速和通信的核心软件。将硬件算力暴露为编程接口（API）</td>
+    <td>NCCL 带宽利用率、CUDA 版本兼容性</td>
+  </tr>
+  <tr>
+    <td><strong>系统层</strong></td>
+    <td>Docker、Containerd、Linux OS</td>
+    <td>环境封装和进程隔离。确保训练程序在不同的机器上跑起来结果一致</td>
+    <td>容器启动时间、镜像大小、内核参数调优</td>
+  </tr>
+  <tr>
+    <td><strong>硬件层</strong></td>
+    <td>GPU（H100/B200）、CPU、HBM、DRAM、NVMe SSD</td>
+    <td>计算和本地存储。物理上产生算力、存放数据</td>
+    <td>TFLOPS、显存容量与带宽、CPU 核心数</td>
+  </tr>
+  <tr>
+    <td><strong>互联层</strong></td>
+    <td>InfiniBand、NVLink、NVSwitch、400G/800G 光模块、RoCE</td>
+    <td>数据传输。GPU 之间、GPU 到存储之间的数据高速公路</td>
+    <td>网络带宽（Gbps）、延迟（微秒）、尾延迟（P99）</td>
+  </tr>
+  <tr>
+    <td><strong>设施层</strong></td>
+    <td>液冷系统、配电柜、UPS、发电机、机柜、冷却塔</td>
+    <td>物理基础。保证上面六层有电、不热、不宕机</td>
+    <td>PUE、供电可靠性（99.99%+）、散热能力（kW/机柜）</td>
+  </tr>
+</table>
+
+<p><strong>怎么读这张表：</strong>如果你负责应用层的事（写代码、跑实验），你不需要关心 UPS 配几台。但你需要知道你的代码跑在什么平台上——如果团队决定用昇腾而不是 NVIDIA，你的 PyTorch 代码需要适配 CANN。如果你负责基础设施层的事（机房建设、配电），你不需要知道 PyTorch 的版本号，但你需要知道一个满载的 1024-GPU 集群总功耗是 2.5MW，以此做电力规划。</p>
+
+<p>各层之间的关系一句话总结：<strong>设施层断电，上面六层全停。互联层有瓶颈，算力层有劲使不出。平台层生态薄弱，应用层开发效率打折。</strong></p>
+
+<h2>四、关键趋势</h2>
+
+<h3>1. 液冷从"可选项"变成"必选项"</h3>
+
+<p>B200 单卡功耗 1000W，一台 8 卡服务器仅 GPU 就 8kW。风冷的经济性边界大约在 30kW/机柜——超过这个值，风扇的功耗和噪音增长不再是线性的。液冷不是"更高级的选择"，而是高密度计算下的唯一可行解。2025-2026 年，新投产的训练集群如果还上风冷，架构评审阶段就会被质疑。</p>
+
+<p>液冷带来的连锁变化也很深远：机房层高、管道布局、冷却塔选址、维修动线——这些在土建阶段就要定。液冷的 PUE（约 1.1-1.2）比风冷（约 1.4-1.6）低很多，对运营成本（电费）的节省长期来看非常可观。一台 2.5MW 的集群，PUE 从 1.5 降到 1.2，每年省约 260 万度电。</p>
+
+<h3>2. 800G 网络从"前沿"走向"规模部署"</h3>
+
+<p>2025-2026 年，800G 光模块的出货量将完成从"样品验证"到"批量采购"的跨越。推动力直接而简单：B200 的算力翻倍了，网络带宽不跟着翻，GPU 空转等数据的比例就会上升。目前 400G 每 GPU 在 H100 上跑 70-80% 利用率，换了 B200 后如果网络不变，利用率可能掉到 50%。800G 不是"更好"，是"不然更差"。</p>
+
+<p>光模块侧，中际旭创已经在 800G 上取得先发优势，Coherent 和华工科技在快速追赶。1.6T 光模块也已经在研发和送样阶段。</p>
+
+<h3>3. CXL 内存池化：打破"每台服务器固定内存"模式</h3>
+
+<p>CXL（Compute Express Link，一种基于 PCIe 的高速互联协议）正在改变内存的使用方式。传统架构下，每台服务器的内存"焊死在主板上"，这台服务器用不完的 DRAM，旁边的服务器也用不上。CXL 让多台服务器可以共享一个"内存池"——需要更多内存就向池子里申请，不用了就还给池子。</p>
+
+<p>这对 AI 推理场景的影响尤其大。一个大模型推理时，最重要的瓶颈往往是显存和内存容量，而不是算力。CXL 内存池化可以让推理实例动态获取内存，不需要为了"可能用到的峰值"预留大量吃灰的 DRAM。不过 CXL 的延迟比本地 DRAM 高（数十纳秒 vs 百纳秒级），具体在 AI 场景的适用性还在验证中。</p>
+
+<h3>4. 国产化替代：从"能用"到"好用"的鸿沟</h3>
+
+<p>华为昇腾是国内 AI 芯片的主旗手。910B 在制程（7nm vs 4nm）、显存（64GB vs 80-192GB）和软件生态（CANN vs CUDA）上和国际一线仍有差距，但它是目前唯一能提供"芯片+服务器+交换机+存储+软件"全栈国产方案的玩家。</p>
+
+<p>寒武纪的思元系列、海光信息的深算系列、天数智芯的天垓系列、壁仞科技的 BR100 系列也在各自赛道推进。这些国产芯片的共同挑战不是"做不出来"，而是"怎么让开发者愿意用"——CUDA 生态的惯性太大，不是给一个 API 转换工具就能解的问题。</p>
+
+<p>短期现实：训练场景的自主替代最难（对算力和生态要求最高），推理场景相对容易（对软件依赖更低，显存容量更关键），政府和国企的信创采购是主要推动力。</p>
+
+<h3>5. 推理算力将以 10 倍速度超过训练算力</h3>
+
+<p>这是目前业界共识最强的趋势之一。训练一个 GPT-4 级别的模型可能需要几万张 GPU 跑几个月，但训练只做一次。模型训出来之后，每天要回答数亿次用户请求——这些"回答"每一次都是一次推理。随着生成式 AI 从"技术 demo"走向"生产系统"（客服、搜索、代码生成、内容创作），推理算力的总需求量将远超训练。</p>
+
+<p>对销售和规划的启示：今天的主战场是训练（抢卡、建集群、做模型），但两三年后真正的大市场是推理——它需要的不是最强单卡，而是"高性价比 + 低延迟 + 高并发"的组合。NVIDIA L40S、AMD MI300X 甚至消费级 GPU（如 RTX 5090）在推理场景下都有机会。</p>
+
+<h3>6. 集群规模持续增长：从千卡到万卡到十万卡</h3>
+
+<p>竞争逻辑简单而残酷：更大规模 = 更多的 GPU 同时算 = 更快的训练 = 更短的迭代周期。xAI 的 Colossus 集群已经部署了 10 万张 GPU，Meta 宣布的计划超过 35 万张。每一个数量级的跃升都不仅仅意味着买更多卡——网络拓扑要从 Leaf-Spine 升级到更复杂的 DragonFly 甚至三维环网，散热要从单机液冷升级到整机柜浸没式液冷，调度系统要能在十万卡级别做故障检测和任务重调度。</p>
+
+<p>十万卡不是"100 个千卡集群拼起来"——它的工程复杂度和成本不是线性的。</p>
+
+<div class="callout">
+  <strong>趋势之间的关联：</strong>这六个趋势不是彼此独立的。液冷是为了支撑更高密度（每机柜更多 GPU），更高密度是为了支撑更大集群，更大集群是为了训练更大模型，更大模型需要 800G 网络和 CXL 内存，而这一切的前提是有足够多的推理需求让投入值得——而国产芯片也在沿着同样的路径追赶，只是阶段不同。
+</div>
+
+<h2>五、给销售/非技术岗的速查清单</h2>
+
+<p>和客户聊智算中心时，对方说一句话，你能快速对应到他真正关心什么、你应该往哪个方向引导。这张表不是念给客户听的，是帮助你在脑子里做快速匹配。</p>
+
+<table>
+  <tr><th>客户说</th><th>他真正关心的</th><th>你应该关注的</th><th>相关章节</th></tr>
+  <tr>
+    <td>"我们要训练大模型"</td>
+    <td>训练速度、集群规模、多卡效率</td>
+    <td>GPU 算力（TFLOPS）、NVLink 互联带宽、InfiniBand 网络、并行文件系统吞吐量</td>
+    <td>GPU 芯片、网络互联、存储系统</td>
+  </tr>
+  <tr>
+    <td>"我们要做推理服务"</td>
+    <td>并发用户数、响应延迟、单次请求成本</td>
+    <td>显存容量（越大越能装大模型或服务更多并发）、推理引擎（TensorRT-LLM/vLLM）、低精度量化（INT8/INT4）</td>
+    <td>GPU 芯片、推理引擎</td>
+  </tr>
+  <tr>
+    <td>"我们预算有限"</td>
+    <td>性价比、TCO（总拥有成本）、有没有便宜替代</td>
+    <td>AMD MI300X（算力不差但便宜）、RoCE 替代 InfiniBand（省网络成本）、推理卡替代训练卡、国产 GPU</td>
+    <td>GPU 芯片、网络互联</td>
+  </tr>
+  <tr>
+    <td>"我们要国产化/信创"</td>
+    <td>合规、自主可控、政策支持</td>
+    <td>华为昇腾 + Atlas 服务器 + CloudEngine 交换机 + OceanStor 存储（全栈国产唯一选择）、寒武纪（AI 芯片）、海光（x86 CPU+GPU）</td>
+    <td>GPU 芯片、服务器整机、存储系统</td>
+  </tr>
+  <tr>
+    <td>"我们担心散热/供电"</td>
+    <td>机房条件是否满足、要不要改造、运营成本</td>
+    <td>液冷方案（冷板 vs 浸没）、PUE 值、机柜配电能力、是否需电力扩容</td>
+    <td>散热与供电</td>
+  </tr>
+  <tr>
+    <td>"我们之前用小集群，现在要扩容"</td>
+    <td>网络拓扑能不能平滑扩展、存储性能能不能线性增长</td>
+    <td>Leaf-Spine 拓扑（加 Leaf 即扩容）、并行文件系统（加服务器即加带宽）、调度系统是否支持超大规模</td>
+    <td>网络互联、存储系统</td>
+  </tr>
+  <tr>
+    <td>"我们训练总断/GPU 利用率低"</td>
+    <td>集群可靠性、监控告警、故障恢复</td>
+    <td>GPU 故障率（ECC 错误）、Checkpoint 策略（多久存一次）、DCGM 监控、Slurm 作业重调度</td>
+    <td>服务器整机、集群监控</td>
+  </tr>
+  <tr>
+    <td>"现在买 NVIDIA 还是等下一代"</td>
+    <td>时间窗口、供应链风险、技术过时</td>
+    <td>架构代际（Hopper → Blackwell 2024）、美国出口管制（H800 降规）、供应交期</td>
+    <td>GPU 芯片、服务器整机</td>
+  </tr>
+</table>
+
+<div class="callout warn">
+  <strong>一个常被问到的判决性问题："A100 和 H100 选哪个？"</strong><br>
+  A100 是 2020 年的 Ampere 架构，H100 是 2022 年的 Hopper。如果只做推理，A100 完全够用且便宜不少。如果做训练——尤其是千卡以上集群——H100 的 FP8 Transformer Engine 和更快的 NVLink 带来的效率提升足以覆盖差价。H100 已进入成熟供应阶段，A100 可能在 2025-2026 年被 NVIDIA 主动停产。新项目选 H100 是最低风险的决策，除非预算卡死且只做推理。
+</div>
+
+<h2>六、全篇品牌总汇</h2>
+
+<p>这是一张跨越整个智算中心全栈的品牌地图。每个领域的"主要玩家"是基于市占率和行业影响力判断的，不是说其他品牌不存在。</p>
+
+<table>
+  <tr><th>领域</th><th>主要品牌</th><th>市场格局</th></tr>
+  <tr>
+    <td><strong>AI GPU 芯片</strong></td>
+    <td>NVIDIA、AMD、Intel、华为（昇腾）、寒武纪、壁仞科技、天数智芯、海光信息</td>
+    <td>NVIDIA 约 90%（训练），AMD 在推理侧追赶。华为是国产替代主力，受制裁但政策加持。Intel Gaudi 走差异化路线（网口集成）</td>
+  </tr>
+  <tr>
+    <td><strong>HBM 显存</strong></td>
+    <td>SK 海力士、三星、美光</td>
+    <td>SK 海力士是 NVIDIA H100/H200/B200 的主力供应商。三星和美光在 HBM3e 上追赶。三家独占市场，中国长鑫存储（CXMT）正在切入</td>
+  </tr>
+  <tr>
+    <td><strong>DRAM 系统内存</strong></td>
+    <td>三星、SK 海力士、美光、长鑫存储（CXMT）</td>
+    <td>前三家占 95%+ 市场。长鑫在 DDR4/DDR5 上逐步量产，是国产替代主力和价格平衡者</td>
+  </tr>
+  <tr>
+    <td><strong>GPU 服务器</strong></td>
+    <td>NVIDIA DGX、Dell、HPE、Lenovo、Supermicro、浪潮信息、新华三（H3C）、超聚变、宁畅</td>
+    <td>NVIDIA DGX 是原厂整机。Dell/HPE/Supermicro 是国际 OEM 主力。浪潮/超聚变/H3C 是国内前三。每家的核心差异在散热方案、BIOS 调优和售后支持</td>
+  </tr>
+  <tr>
+    <td><strong>InfiniBand 交换机</strong></td>
+    <td>NVIDIA / Mellanox</td>
+    <td>NVIDIA 垄断，无实质对手。Quantum 系列是万卡训练集群的唯一选择</td>
+  </tr>
+  <tr>
+    <td><strong>以太网交换机芯片</strong></td>
+    <td>Broadcom、NVIDIA（Spectrum）、华为（海思）</td>
+    <td>Broadcom 芯片是大多数品牌交换机的核心。NVIDIA Spectrum 是自家生态的以太网选择。华为海思自研芯片用于自家 CloudEngine</td>
+  </tr>
+  <tr>
+    <td><strong>交换机整机</strong></td>
+    <td>Cisco（Nexus）、Arista、华为（CloudEngine）、H3C、Ruijie</td>
+    <td>Cisco 是企业网络王者，Arista 是云数据中心挑战者，华为/H3C 是国内数据中心主力。AI 集群场景下 NVIDIA 自家交换机更有优势</td>
+  </tr>
+  <tr>
+    <td><strong>光模块</strong></td>
+    <td>中际旭创（InnoLight）、Coherent、华为（海思）、新易盛（Eoptolink）、华工科技</td>
+    <td>中国厂商在 400G/800G 光模块出货量上全球领先。中际旭创是 NVIDIA 核心供应商。Coherent 在 800G/1.6T 高端产品上有先发优势</td>
+  </tr>
+  <tr>
+    <td><strong>并行文件系统</strong></td>
+    <td>DDN（A³I / Lustre）、Weka（WekaFS）、IBM（GPFS / Spectrum Scale）、华为（OceanStor Pacific）、VAST Data</td>
+    <td>DDN 是 AI 存储市占率最高的厂商，基于开源 Lustre。WekaFS 是增长最快的新锐。华为 OceanStor 是国产替代首选。VAST Data 架构创新激进</td>
+  </tr>
+  <tr>
+    <td><strong>全闪存存储</strong></td>
+    <td>Pure Storage（FlashBlade）、NetApp（ONTAP AI）、Dell（PowerScale）</td>
+    <td>Pure Storage 以"极简运维"著称，适合不想养 Lustre 团队的客户。NetApp 强在企业数据管理和混合云。Dell PowerScale 是传统 NAS 横向扩展标杆</td>
+  </tr>
+  <tr>
+    <td><strong>液冷散热</strong></td>
+    <td>CoolIT、Asetek、Boyd、Vertiv、英维克（Envicool）、高澜股份</td>
+    <td>CoolIT 是 NVIDIA 液冷参考设计合作伙伴，在 DGX 液冷方案中地位领先。英维克和高澜是国内液冷头部，受益于国产智算中心建设</td>
+  </tr>
+  <tr>
+    <td><strong>数据中心基础设施</strong></td>
+    <td>Vertiv、Schneider Electric（APC）、华为数字能源</td>
+    <td>Vertiv 和施耐德是全球数据中心电力/散热基础设施双巨头。华为数字能源在国内政企市场市占率高</td>
+  </tr>
+  <tr>
+    <td><strong>IDC 运营商</strong></td>
+    <td>万国数据（GDS）、秦淮数据、数据港、Equinix</td>
+    <td>提供机房、电力、冷却、安防等基础设施。万国数据和秦淮数据是国内头部，Equinix 是全球最大</td>
+  </tr>
+  <tr>
+    <td><strong>云计算厂商（GPU 租赁）</strong></td>
+    <td>阿里云、腾讯云、华为云、AWS、Azure、Google Cloud</td>
+    <td>中小企业获取 GPU 算力的最主要渠道。AWS 和 Azure 在海外领先，阿里云和华为云在国内领先</td>
+  </tr>
+  <tr>
+    <td><strong>科技巨头自建</strong></td>
+    <td>Meta、OpenAI、xAI、字节跳动、Tesla（Dojo）</td>
+    <td>自建自用，不对外租赁，规模往往是最大的。xAI Colossus 已达 10 万 GPU</td>
+  </tr>
+</table>
+
+<h2>七、总结</h2>
+
+<div class="summary-box">
+  <h3>智算中心 = 算力（GPU + 内存）x 网络 x 存储 x 散热</h3>
+
+  <p>用一句话概括全系列的核心结论：</p>
+
+  <p><strong>智算中心的本质是把"一块 GPU 算不动的任务"拆到几千块 GPU 上同时算。拆分的艺术在于让 GPU 之间的通信（网络）和 GPU 到数据的通道（存储）都不成为瓶颈，同时散热和供电保证它们在数周的满负荷运行中不倒下。</strong></p>
+
+  <p>具体而言：</p>
+
+  <ul>
+    <li><strong>算力是发动机：</strong>GPU 提供计算能力，HBM 以超高带宽把数据喂给 GPU。单卡算力决定了"最坏情况下能做多少"，显存容量决定了"多大的模型能装下"。NVIDIA 市占率约 90%，CUDA 是积累了 18 年的生态护城河。AMD 纸面参数亮眼但软件生态有差距，华为昇腾是国产替代主力但受制程和显存限制。</li>
+    <li><strong>网络是传动轴：</strong>几千张 GPU 之间频繁通信，GPU 有 30%-50% 的时间在等网络。InfiniBand 是万卡训练集群的标配。NVIDIA 通过收购 Mellanox 控制了从 NVLink 到交换机的全链路。网络不是"配件"——它占集群成本 15%-25%，是一级设计决策。</li>
+    <li><strong>存储是燃料管：</strong>1000 张 H100 需要 100-300 GB/s 的持续读取速度。普通 NFS 完全不够，必须上并行文件系统（Lustre/WekaFS）。存储只占总成本 5%-10%，但配不够会让 GPU 空转——你省了几百万存储预算，但每年多付几千万的算力浪费。</li>
+    <li><strong>散热和供电是地基：</strong>B200 单卡 1000W，1024 卡集群总功耗约 2.5MW。液冷从可选项变成必选项，没有好的散热方案，算力密度就上不去。供电需要双路市电 + UPS + 发电机的冗余架构——训练跑了三周后断电，损失不是电费是几千万 GPU 小时的算力。</li>
+    <li><strong>软件是操作系统：</strong>硬件决定上限，软件决定效率。CUDA 是平台层的根基，PyTorch 是应用层的事实标准，DeepSpeed 是分布式训练的内存优化核心，TensorRT-LLM / vLLM 是推理部署的加速引擎，Prometheus + DCGM 是监控的标配。</li>
+  </ul>
+
+  <p>NVIDIA 统治了从芯片到网络到软件的全链路，但每一个环节都有挑战者在追赶。硬件的竞争看纸面参数，真正的胜负手在生态——谁能建立自己的"CUDA"，谁才有可能在下一个十年分一杯羹。</p>
+
+  <p>最后一个也是最容易被忽略的观点：<strong>硬件决定上限，软件决定效率，监控决定可靠性。三者缺一不可。</strong>一个十万卡的集群，如果监控不到位，故障发现和恢复慢 30 分钟，GPU 空转的成本能让一年的运维预算打水漂。不要只关注"买什么卡"，也要关注"出了问题怎么第一时间知道"。</p>
+</div>
+
+<h2>八、延伸阅读</h2>
+
+<p>这个系列覆盖了智算中心全栈知识的骨架。如果你想继续深入某个领域，以下是经过筛选的优质资源：</p>
+
+<ol>
+  <li>
+    <strong>NVIDIA 官方技术博客</strong> — <a href="https://developer.nvidia.com/blog/" target="_blank" rel="noopener">developer.nvidia.com/blog</a><br>
+    涵盖从 CUDA 编程技巧到大规模集群部署实践的深度文章。GPU 架构白皮书、NCCL 调优、DGX SuperPOD 参考架构都在这里。如果你想了解一个具体技术问题的最权威解释，从这里开始搜。
+  </li>
+  <li>
+    <strong>"How to Build an H100 GPU Cluster"</strong> — SemiAnalysis<br>
+    不是一本书，是一系列讲如何从零搭建 GPU 集群的深度文章。涉及物理选址、电力规划、网络拓扑、冷却方案、成本模型。比官方文档更"接地气"，适合需要做实际规划和预算的人。
+  </li>
+  <li>
+    <strong>"CUDA Programming Guide"</strong> — NVIDIA 官方文档<br>
+    CUDA 编程的圣经。即使你不写 CUDA 代码，理解 GPU 的线程模型、内存层次、流的机制也能帮你判断"训练脚本慢在不在 GPU 侧"。CUDA 概念的参透程度是区分"会用 GPU"和"懂 GPU"的分界线。
+  </li>
+  <li>
+    <strong>PyTorch 官方文档 · 分布式训练部分</strong> — <a href="https://pytorch.org/docs/stable/distributed.html" target="_blank" rel="noopener">pytorch.org/docs/stable/distributed.html</a><br>
+    了解 PyTorch 的分布式训练 API（DDP、FSDP、Tensor Parallel、Pipeline Parallel）及其背后的通信模式。如果你需要判断一个训练任务"要不要做模型并行"或"卡多了会不会通信瓶颈"，这里给标准答案。
+  </li>
+  <li>
+    <strong>DeepSpeed 官方文档</strong> — <a href="https://www.deepspeed.ai/" target="_blank" rel="noopener">deepspeed.ai</a><br>
+    ZeRO 优化（ZeRO-1/2/3）是当前大模型分布式训练中最核心的显存节省技术。理解 ZeRO 的三个阶段分别把什么数据分片到不同的 GPU 上，是看懂大模型训练内存预算的关键。
+  </li>
+  <li>
+    <strong>Lustre 官方文档</strong> — <a href="https://wiki.lustre.org/" target="_blank" rel="noopener">wiki.lustre.org</a><br>
+    并行文件系统的开源标杆。如果你们团队要自建 Lustre 集群，或需要判断"要不要用 Lustre"，从这里了解它的组件架构（MDS/OSS/MGS）、stripe 策略和性能调优参数。
+  </li>
+  <li>
+    <strong>"The Datacenter as a Computer"</strong> — Luiz Andre Barroso 等，Google<br>
+    中文常译为《数据中心即计算机》。Google 工程师写的经典教材，不是专门讲 AI，但提供了理解大规模分布式系统的通用框架。书中关于"故障是常态而非例外"和"尾延迟放大效应"的论述，对理解为什么智算中心对可靠性要求极高有深刻帮助。
+  </li>
+  <li>
+    <strong>中国信通院《智算中心发展报告》</strong> — 每年更新<br>
+    从政策、产业、技术三个维度梳理国内智算中心的布局现状和趋势。适合需要从市场层面了解"全国建了多少智算中心、都在哪、谁建的"的读者。
+  </li>
+</ol>
+
+<div class="callout">
+  <strong>本系列到此结束。</strong><br>
+  智算中心是一个快速演变的领域——今天写的参考配置，两年后可能就过时了。但底层原理（并行计算、RDMA、内存层级、分布式系统故障模型）是相对稳定的。抓住这些不变的东西，比追踪每一代新 GPU 的参数更重要。
+</div>
+
+<p style="margin-top: 32px; text-align: center; font-size: 14px; color: var(--color-muted);">
+  <a href="01-overview.html">回到开篇：全景图</a>
+</p>
+
+</main>
+
+<script src="../js/nav.js"></script>
+</body>
+</html>

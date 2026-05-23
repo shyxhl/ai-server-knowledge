@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>容器与资源调度 — 智算中心服务器全栈知识</title>
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+
+<nav class="sidebar">
+  <h2>智算中心服务器<br>全栈知识</h2>
+  <div class="stage-title">阶段 1</div>
+  <a href="01-overview.html">全景图：什么是智算中心</a>
+  <div class="stage-title">阶段 2 · 算力</div>
+  <a href="02-1-gpu-chips.html">GPU 芯片</a>
+  <a href="02-2-memory.html">内存系统</a>
+  <a href="02-3-gpu-servers.html">GPU 服务器整机</a>
+  <div class="stage-title">阶段 3 · 网络</div>
+  <a href="03-network.html">网络互联</a>
+  <div class="stage-title">阶段 4 · 存储</div>
+  <a href="04-storage.html">存储系统</a>
+  <div class="stage-title">阶段 5 · 基础设施</div>
+  <a href="05-cooling-power.html">散热与供电</a>
+  <div class="stage-title">阶段 6 · 软件栈</div>
+  <a href="06-1-drivers.html">驱动与加速层</a>
+  <a href="06-2-containers.html">容器与资源调度</a>
+  <a href="06-3-training.html">分布式训练框架</a>
+  <a href="06-4-inference.html">推理引擎</a>
+  <a href="06-5-monitoring.html">集群管理与监控</a>
+  <div class="stage-title">总结</div>
+  <a href="07-summary.html">完整参考架构</a>
+</nav>
+
+<main class="main">
+
+<h1>阶段 6.2 · 容器与资源调度</h1>
+
+<p>前面我们讲了驱动和加速库——它们让单台机器上的 GPU 能高效运转。但智算中心有几百上千台服务器、几千上万张 GPU，同时有几十上百个算法工程师在上面跑任务。这么多人和机器的"撮合"问题，就是容器和资源调度要解决的。</p>
+
+<h2>场景：GPU 怎么分给 100 个工程师？</h2>
+
+<p>一个智算中心有 1000 台 GPU 服务器、8000 张 GPU。100 个算法工程师同时在做实验——有人要 8 张卡训练大模型，有人要 2 张卡做微调，有人要 1 张卡跑推理测试。怎么公平、高效地把这些 GPU 分配出去？谁来排队？谁优先？</p>
+
+<p>如果每次跑任务都要手动指定用哪台机器、哪张卡，那运维人员会疯掉。你想象一下：每个人来找你——"帮我看看 47 号机现在有没有空卡？""我的任务跑了一半断了，你能帮我重新分配一下吗？"——这根本不现实。</p>
+
+<p>我们需要一个自动化的资源调度系统。它的核心任务就一句话：<strong>把用户提交的计算任务，自动分配到最合适的机器上运行。</strong></p>
+
+<p>但在讲调度之前，必须先讲容器——因为容器决定了"任务"长什么样、怎么打包、怎么搬运。</p>
+
+<h2>核心概念</h2>
+
+<h3>Docker / Containerd：把程序"装进箱子"</h3>
+
+<p><strong>容器</strong>（Container）是什么？最直白的理解：把程序运行所需的一切——代码、库、配置文件、依赖项——打包成一个标准化的"集装箱"。这个箱子拿到任何一台机器上都能直接运行，不需要重新安装任何东西。</p>
+
+<p>为什么 AI 领域特别需要容器？因为机器学习框架（机器学习框架，指 PyTorch、TensorFlow 等用来开发和训练模型的软件工具）的依赖链极复杂。举个例子：你要跑一个 PyTorch 训练脚本，你需要：</p>
+
+<ul>
+  <li>特定版本的 Python（比如 3.10，不能用 3.11）</li>
+  <li>特定版本的 PyTorch（比如 2.1.0）</li>
+  <li>特定版本的 CUDA（NVIDIA GPU 的并行计算平台，见阶段 6.1）</li>
+  <li>特定版本的 cuDNN（NVIDIA 的深度学习加速库）</li>
+  <li>各种第三方 Python 包（numpy、transformers、datasets…）</li>
+</ul>
+
+<p>这些组件版本之间如果有一个对不上，程序就可能报错甚至崩溃。算法工程师的经典噩梦：在自己的笔记本上跑得好好的，推到服务器上就挂了——即传说中的"在我机器上没问题"（"works on my machine"问题）。容器把这个月彻底解决了。</p>
+
+<div class="callout">
+  <strong>生活类比：</strong><br>
+  没有容器的时候，就像搬家——把家具、电器、衣服一件件装车，到新地方再一件件拿出来摆好，过程中总有磕碰和丢失。<br>
+  有了容器，就像用标准集装箱搬家——所有东西提前装进箱子，叉车一叉就走，到地方直接放下就能用。不管目的地是码头还是仓库，箱子的内容物不受影响。
+</div>
+
+<h3>容器 vs 虚拟机：不是一个东西</h3>
+
+<p>经常有人把容器和虚拟机（Virtual Machine，简称 VM）搞混。核心区别在于"隔离的层级"：</p>
+
+<table>
+  <tr><th>对比维度</th><th>容器（Container）</th><th>虚拟机（VM）</th></tr>
+  <tr><td>隔离层级</td><td>进程级——共享宿主机操作系统内核</td><td>硬件级——每个 VM 有自己的完整操作系统</td></tr>
+  <tr><td>启动速度</td><td>秒级（本质上是启动一个进程）</td><td>分钟级（需要启动完整操作系统）</td></tr>
+  <tr><td>资源开销</td><td>很小——只比直接跑进程多一点点</td><td>大——每台 VM 要占几 GB 内存跑操作系统</td></tr>
+  <tr><td>镜像大小</td><td>几百 MB（仅含应用和依赖）</td><td>几 GB 到几十 GB（含完整操作系统）</td></tr>
+  <tr><td>GPU 访问</td><td>直接透传——性能几乎无损</td><td>需要额外配置 GPU 直通，复杂度更高</td></tr>
+</table>
+
+<p>关键结论：<strong>在 AI 场景下，容器是唯一合理的选择。</strong>虚拟机太重了——每台 VM 要多占几 GB 内存去跑一个完整操作系统，对 GPU 内存本就紧张的训练任务来说完全不可接受。而且容器启动快、迁移快，适合 AI 任务"来了就开始算、算完就释放"的特点。</p>
+
+<h3>Docker 和 Containerd 的关系</h3>
+
+<p><strong>Docker</strong> 是这个领域最知名的品牌——它让"容器"这个概念从专业运维圈走进了每一个开发者的日常。Docker 实际上是一整套工具：不仅做容器打包和运行，还管镜像构建、镜像仓库、网络配置等。</p>
+
+<p><strong>Containerd</strong>（容器运行时，发音 "container-dee"）是 Docker 把最核心的"运行容器"这部分功能拆出来、捐给开源社区的项目。今天 Kubernetes 默认用 Containerd 而不是 Docker 的完整版——因为编排平台只需要"跑容器"这个功能，不需要镜像构建那些额外功能。</p>
+
+<p>简单记：Docker 是面向开发者的全功能工具，Containerd 是面向生产环境的最小核心。两者底层都依赖同一个行业标准——<strong>OCI</strong>（Open Container Initiative，开放容器标准），保证各家容器之间可以互通。</p>
+
+<h3>Kubernetes（K8s）：容器的"指挥官"</h3>
+
+<p>有了容器之后，下一个问题：我有几百上千台服务器，每个容器该放到哪台机器上跑？单靠人手动分配不现实。<strong>Kubernetes</strong>（简称 K8s，因为 k 和 s 中间有 8 个字母）就是解决这个问题的——它是容器编排平台（容器编排：自动调度、部署和管理大量容器的系统），目前是业界事实标准。</p>
+
+<div class="callout">
+  <strong>K8s 名字由来：</strong>Kubernetes 源于希腊语，意为"舵手"或"领航员"。Google 于 2015 年开源，基于其内部运行了十多年的 Borg 系统。名字很长，业界用 K8s 这个缩写——把首字母 K 和尾字母 s 中间的 8 个字母用数字 8 替换。读法：直接读"K eight s"（K 八 s）。
+</div>
+
+<p>K8s 帮我们解决什么问题？</p>
+
+<ul>
+  <li><strong>自动调度：</strong>你提交一个需要 8 张 GPU 的训练任务，K8s 自动找有空闲 GPU 的机器，把容器部署上去。你不需要知道它在哪台机器上跑。</li>
+  <li><strong>健康监控：</strong>容器挂了，自动重启。机器宕机了，自动把任务迁移到另一台机器上。</li>
+  <li><strong>弹性伸缩：</strong>推理服务访问量大增，自动增加副本。夜深人静没人用了，自动缩回去省资源。</li>
+  <li><strong>服务发现：</strong>容器 IP 会变，但 K8s 给你的"服务地址"不变。一个任务的输出可以直接通过固定地址被另一个任务发现和使用。</li>
+</ul>
+
+<h3>NVIDIA Device Plugin：让 K8s 知道"我有 GPU"</h3>
+
+<p>K8s 天生知道怎么管理 CPU 和内存，但不知道什么是 GPU。需要装一个插件来告诉它。</p>
+
+<p><strong>NVIDIA Device Plugin</strong>（NVIDIA 设备插件）是一个 K8s 组件，安装在每台有 GPU 的服务器上。它的工作很简单：扫一遍这台机器上有几张 GPU、什么型号、剩余多少显存，然后把信息上报给 K8s 调度器。这样调度器就知道"这台机器有 8 张 H100，空了 3 张"，做调度决策时就有数据依据了。</p>
+
+<p>如果不装这个插件，K8s 连你机器上有 GPU 都不知道，更谈不上分配。</p>
+
+<h3>GPU 虚拟化：把一张大卡"切"成多张小卡</h3>
+
+<p>有些任务不需要一整张 GPU。比如一个推理测试可能 2GB 显存就够跑，给一张 80GB 的 H100 太浪费了。这时候需要"切 GPU"。</p>
+
+<div class="concept-cards">
+  <div class="concept-card">
+    <h4>MIG（多实例 GPU）</h4>
+    <p>Multi-Instance GPU 的缩写。NVIDIA 从 A100 开始支持的技术。在硬件层面把一张物理 GPU 切成多个独立的小 GPU——每个小 GPU 有自己专属的显存、缓存和计算单元，彼此完全隔离。一张 H100 最多可以切成 7 个独立实例。切出来的每个实例看起来就像一张完整的独立 GPU，可靠性高。</p>
+  </div>
+  <div class="concept-card">
+    <h4>vGPU（虚拟 GPU）</h4>
+    <p>Virtual GPU 的缩写。软件层面的 GPU 切分，主要用于较老的 GPU（如 V100 之前的产品）。原理是时间分片——多个任务轮流使用 GPU，每个任务分到一段时间窗口。优点是灵活，缺点是隔离性差：一个任务卡了可能影响其他任务，且性能有波动。</p>
+  </div>
+  <div class="concept-card">
+    <h4>MPS（多进程服务）</h4>
+    <p>Multi-Process Service 的缩写。NVIDIA 提供的一个软件方案，让同一张 GPU 上的多个 CUDA 进程可以"同时"跑，而不是排队。不切硬件，只是让多个进程可以并发访问 GPU。适用于多个小推理任务共享同一张卡的场景。</p>
+  </div>
+</div>
+
+<div class="callout warn">
+  <strong>注意：</strong>MIG 是硬件级切分，最可靠但灵活性差（切好的大小是固定的）。vGPU 和 MPS 是软件级方案，灵活但隔离性差。实际选哪个取决于场景：训练任务通常要独占整卡，推理任务适合用 MIG 或 MPS 共享一张卡。
+</div>
+
+<h3>Slurm：传统 HPC 世界的"排队系统"</h3>
+
+<p>在 K8s 兴起之前，高性能计算（HPC，High-Performance Computing，即用大量计算机同时算一个任务）领域早就有自己的资源管理工具——<strong>Slurm</strong>（Simple Linux Utility for Resource Management，发音同 "slurm" 一词，意为"咣当一声"）。</p>
+
+<p>Slurm 的核心模型是<strong>作业队列</strong>：用户提交一个作业——写明"我要多少台机器、多少张 GPU、跑多久"——Slurm 把它放进队列。当前面的作业跑完了，资源空出来，Slurm 就自动启动下一个等待的作业。</p>
+
+<p>这和 K8s 的哲学有根本区别：</p>
+
+<table>
+  <tr><th>对比维度</th><th>Kubernetes</th><th>Slurm</th></tr>
+  <tr><td>核心模型</td><td>服务型——微服务长期运行，有请求就处理</td><td>作业型——排队、运行、结束、释放资源</td></tr>
+  <tr><td>典型场景</td><td>在线推理服务（API 请求进来—推理—返回结果，7x24 运行）</td><td>离线训练任务（跑几小时到几天，跑完结束）</td></tr>
+  <tr><td>任务生命周期</td><td>长期运行，可能几周几个月不停</td><td>有明确开始和结束，跑完就停了</td></tr>
+  <tr><td>资源分配</td><td>声明式——"我需要 8 张 GPU"，K8s 自动找</td><td>调度式——进队列排队，轮到你了分配资源</td></tr>
+  <tr><td>用户群体</td><td>云原生、互联网公司、AI 平台团队</td><td>学术界、超算中心、传统科研计算</td></tr>
+</table>
+
+<p>实际上，很多 AI 集群<strong>两者都装</strong>：Slurm 管理训练作业的排队和调度，K8s 管理推理服务的长期运行。两者不互斥，各管一块。</p>
+
+<h2>技术要点</h2>
+
+<h3>调度策略：谁先跑？谁排队？</h3>
+
+<p>8000 张 GPU，100 个工程师，600 个任务同时排队。谁先跑？怎么排？调度策略决定了集群的资源使用权分配方式。</p>
+
+<div class="concept-cards">
+  <div class="concept-card">
+    <h4>FIFO（先进先出）</h4>
+    <p>First In First Out。最简单的策略——谁先提交谁先跑。公平但不高效：一个要跑 3 天的大任务排在前面，后面一百个 5 分钟的小任务都得干等。</p>
+  </div>
+  <div class="concept-card">
+    <h4>公平分享（Fair-Share）</h4>
+    <p>按团队或个人历史用量来分配优先级。一个组最近用了很多资源，优先级就降低；另一个组没怎么用，优先级就提高。保证长期来看每个组都能拿到自己"该得"的那份。</p>
+  </div>
+  <div class="concept-card">
+    <h4>优先级队列（Priority Queue）</h4>
+    <p>管理员给不同用户或项目设置不同的优先级权重。VIP 用户的任务优先执行，普通用户等一等。适合企业多部门共享集群的场景。</p>
+  </div>
+  <div class="concept-card">
+    <h4>抢占（Preemption）</h4>
+    <p>高优先级任务来了但资源不够？把正在跑的低优先级任务"暂停"，资源让出来给高优先级的先跑。被暂停的任务保存好当前状态，等资源空出来再恢复——这就是后面要讲的"断点续训"。</p>
+  </div>
+</div>
+
+<h3>Gang Scheduling：要么全部分配，要么一个都不要</h3>
+
+<p>这是一个 AI 训练特有的调度需求。<strong>Gang Scheduling</strong>（群调度，发音 "gang" 即英文"一帮、一群"）的核心意思是：一个分布式训练任务需要 8 张 GPU，这 8 张 GPU 必须<strong>同时到位、同时启动</strong>。不能给 5 张先跑着，等另外 3 张空出来再加——分布式训练的 GPU 之间每轮迭代都要通信，少一张整个训练停摆。</p>
+
+<p>这和微服务应用完全不同。微服务里先启动 3 个副本，后面再加 2 个完全没问题。训练任务不行——缺一张 GPU 就是缺一张，没法"先跑一部分"。</p>
+
+<p>Gang Scheduling 的实现：</p>
+<ul>
+  <li><strong>Slurm 原生支持：</strong>Slurm 天然就是"全部分配一起给"的模型，Gang Scheduling 对它来说是默认行为。</li>
+  <li><strong>K8s 需要扩展：</strong>原生 K8s 调度器不支持 Gang Scheduling。需要装额外的调度插件，比如 <strong>Volcano</strong>（华为开源的 K8s 批调度项目）或 <strong>KubeFlow Training Operator</strong>。</li>
+</ul>
+
+<div class="callout">
+  <strong>为什么叫 Gang？</strong>Gang 在英文里是"一帮人、一伙人"的意思。Gang Scheduling 的意思是：调度器把这 8 个进程当作一个"帮派"处理——要么 8 个一起上，要么一起等。不会让"帮派"成员分开行动。这比直译的"群调度"更好记——就是"一伙人一起上"。
+</div>
+
+<h3>断点续训：任务被中断了怎么办？</h3>
+
+<p>在大规模集群中，任务被中断是家常便饭：机器故障、网络抖动、高优先级任务抢占、系统维护……如果一个训练任务跑了 3 天、还差 2 小时就完了，突然被停掉要从头再来，谁都会崩溃。</p>
+
+<p><strong>Checkpoint（检查点/快照）</strong>：训练过程中定期把模型参数（模型学到的所有"知识"）和优化器状态（优化器：训练中自动调整模型参数的工具）保存到存储系统。间隔可以设——每 1000 步存一次，或每 30 分钟存一次。</p>
+
+<p>当任务被中断后，从最近的 Checkpoint 恢复继续训练（即 <strong>Resume</strong>），相当于从"上次保存的存档"接着打，而不是从第一关重新开始。</p>
+
+<p>关键细节：</p>
+<ul>
+  <li><strong>Checkpoint 要快：</strong>大模型的 Checkpoint 可能几百 GB。如果存一次要 20 分钟，每隔 30 分钟存一次，那训练时间等效浪费了近一半。所以需要用快速存储（见阶段 4）或异步保存技术。</li>
+  <li><strong>指标要一致：</strong>8 张 GPU 分布式训练，做 Checkpoint 时必须确保所有 GPU 上的模型参数是一致的。不能存到一半 GPU 还没来得及同步。</li>
+</ul>
+
+<h3>GPU 配额管理：公司和团队怎么"分蛋糕"</h3>
+
+<p>一个大智算中心通常是多个团队共享的。销售团队不会管技术细节，但他们需要能跟客户讲清楚：资源怎么分、怎么收费、怎么保证"按额分配"。</p>
+
+<p><strong>Resource Quota</strong>（资源配额，即每个用户或团队最多能用多少资源的硬限制）是核心机制：</p>
+
+<ul>
+  <li>团队 A 拥有 30% 集群配额（即这个团队最多同时用 2400 张 GPU）</li>
+  <li>团队 B 拥有 20% 配额（即 1600 张）</li>
+  <li>预留 10% 给紧急任务和系统维护</li>
+  <li>剩余 40% 作为弹性共享池——先到先得，但不超过各自配额</li>
+</ul>
+
+<p>K8s 用 <strong>ResourceQuota</strong> 和 <strong>LimitRange</strong> 两个内置对象实现配额和限额管理。Slurm 用 <strong>QOS</strong>（Quality of Service，服务质量等级，定义每个用户的资源上限和优先级）和 <strong>Account</strong>（账户，按部门或项目归集资源用量和计费）体系做更细粒度的按小时/按 GPU 数计费。</p>
+
+<div class="callout">
+  <strong>配额 vs 限额：</strong>配额是"团队总共能用多少"（上限），限额是"单个任务最多能用多少"（单任务上限）。两者搭配使用：团队配额防止某个团队占光所有资源；单任务限额防止某个人的一个任务把整个团队配额都吃光——其他队友都没法干活了。
+</div>
+
+<h2>工具与品牌对比</h2>
+
+<p>以下是在 AI 资源调度领域值得关注的几个关键工具：</p>
+
+<table>
+  <tr><th>工具</th><th>类型</th><th>使用场景</th><th>备注</th></tr>
+  <tr>
+    <td><strong>Kubernetes</strong></td>
+    <td>容器编排平台</td>
+    <td>云原生 AI 平台、推理服务、模型部署</td>
+    <td>业界标准，Google 开源，CNCF（云原生计算基金会，Cloud Native Computing Foundation）托管。原生不支持 Gang Scheduling，需安装 Volcano 等调度插件</td>
+  </tr>
+  <tr>
+    <td><strong>Slurm</strong></td>
+    <td>作业调度器</td>
+    <td>传统 HPC、大规模分布式训练</td>
+    <td>TOP500 超算中约 60% 使用 Slurm 做作业调度。队列模型天然适合训练任务，学术界和超算中心的老牌选择</td>
+  </tr>
+  <tr>
+    <td><strong>Run:ai</strong></td>
+    <td>AI 资源平台</td>
+    <td>企业级 GPU 管理和调度</td>
+    <td>NVIDIA 于 2024 年收购。提供 GPU 池化、动态分配、配额管理、成本分析等企业级功能。上层体验好，底层跑在 K8s 上</td>
+  </tr>
+  <tr>
+    <td><strong>Volcano</strong></td>
+    <td>K8s 批调度引擎</td>
+    <td>云原生 AI 训练、大数据处理</td>
+    <td>华为开源，CNCF 沙箱项目。补齐了 K8s 缺失的 Gang Scheduling、公平分享、队列管理等批处理能力</td>
+  </tr>
+  <tr>
+    <td><strong>NVIDIA GPU Operator</strong></td>
+    <td>K8s Operator</td>
+    <td>GPU 驱动和插件自动化管理</td>
+    <td>NVIDIA 官方提供。一键在所有节点上安装 GPU 驱动、Device Plugin、MIG 管理等组件。大幅简化 GPU 集群的运维工作</td>
+  </tr>
+  <tr>
+    <td><strong>KubeFlow</strong></td>
+    <td>MLOps 平台</td>
+    <td>机器学习全流程管理</td>
+    <td>Google 发起。覆盖数据准备、训练、调参、部署全流程。帮助算法工程师在 K8s 上用熟悉的"笔记本"（Notebook，交互式编程环境）做开发</td>
+  </tr>
+</table>
+
+<div class="callout warn">
+  <strong>趋势观察 — NVIDIA 收购 Run:ai 意味着什么？</strong><br>
+  NVIDIA 2024 年收购 Run:ai 是 GPU 资源调度领域的一个标志性事件。NVIDIA 之前卖 GPU 硬件和网络设备，软件层（怎么调度和分配 GPU）是留给客户和第三方去解决的。收购 Run:ai 意味着 NVIDIA 要把调度层也纳入自身体系——从 GPU 硬件、NVLink 网络、CUDA 软件，一路延伸到"谁来用、怎么用"的调度层。全栈控制又加深了一层。对客户来说，一站式方案更方便；对竞争对手来说，进入壁垒又高了。
+</div>
+
+<div class="summary-box">
+  <h3>阶段 6.2 总结</h3>
+  <p>容器让算法工程师不用关心底层机器——代码打包成"集装箱"，到任何机器上都能直接跑。调度系统让成百上千人公平、高效地共享 GPU 资源——谁先跑、谁排队、谁优先、谁暂停，全由系统自动管理。</p>
+  <ul>
+    <li><strong>容器（Docker / Containerd）</strong>解决了"环境一致性问题"——告别"在我机器上能跑"的噩梦</li>
+    <li><strong>Kubernetes（K8s）</strong>是容器编排的事实标准——自动调度、健康监控、弹性伸缩、服务发现</li>
+    <li><strong>Slurm</strong>在传统 HPC 和学术界仍有大量部署——队列模型天然适合训练作业</li>
+    <li><strong>Gang Scheduling（群调度）</strong>是 AI 训练的关键需求——GPU 必须同时到齐，一个不能少</li>
+    <li><strong>MIG（多实例 GPU）</strong>在硬件层面切分 GPU，让一张大卡可以被多个任务共享，提高利用率</li>
+    <li><strong>NVIDIA 收购 Run:ai + GPU Operator</strong>标志着 GPU 资源调度正走向全栈智能化和平台化</li>
+  </ul>
+</div>
+
+<h2>延伸阅读</h2>
+
+<ul>
+  <li><a href="https://kubernetes.io/docs/concepts/overview/" target="_blank">Kubernetes 官方文档 / 概念概览</a> — 了解 K8s 的架构和核心概念。英文为主，部分页面有中文翻译</li>
+  <li><a href="https://slurm.schedmd.com/documentation.html" target="_blank">Slurm 官方文档</a> — HPC 作业调度的标准参考。适合想深入了解队列调度和公平分享算法的读者</li>
+  <li><a href="https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/index.html" target="_blank">NVIDIA GPU Operator 文档</a> — 如何在 K8s 集群中自动化管理 GPU 的驱动、Device Plugin 和 MIG 配置</li>
+</ul>
+
+<p style="margin-top: 32px; font-size: 14px; color: var(--color-muted);">
+  <a href="06-3-training.html">下一阶段：分布式训练框架 →</a>
+</p>
+
+</main>
+
+<script src="../js/nav.js"></script>
+</body>
+</html>
